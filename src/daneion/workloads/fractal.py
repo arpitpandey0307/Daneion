@@ -179,7 +179,7 @@ class FractalTiles(Workload):
             bytes_in=600.0 * len(tasks),  # the lease JSON per tile
             bytes_out=pixels * 2.0,
             # Sparse sampling misses thin filaments; well within FitCheck's 15 % margin.
-            quality=0.85,
+            quality=0.85, merge_s=0.15 * pixels / 1e6,
             note=f"sampled {sampled:,} of {pixels:,} pixels")
 
     def calibrate(self) -> float:

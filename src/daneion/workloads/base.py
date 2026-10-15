@@ -23,6 +23,7 @@ class Estimate:
     quality: float  # 0..1, how much to trust work_units
     note: str = ""
     task_units: list[float] | None = None  # per task, same order as split()
+    merge_s: float = 0.0  # controller time to combine the results (same in both modes)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -24,6 +24,9 @@ WIFI_RISK = 0.10  # extra margin on distributed time for Wi-Fi variance
 STARTUP_LOCAL_S = 0.3
 STARTUP_DIST_S = 0.8
 ROUND_TRIPS_PER_TASK = 4  # lease, accept, start, result
+# Starting a fresh Python process per task (isolation) and importing the handler. Calibration
+# does not see this; speeds learned from real jobs already include it.
+TASK_STARTUP_S = 0.35
 DEFAULT_RTT_S = 0.010
 SOURCE_CONFIDENCE = {"observed": 1.0, "calibrated": 0.85, "default": 0.5}
 
@@ -38,10 +41,11 @@ class Node:
     bandwidth_bps: float | None = None  # measured link to the controller (bytes/s)
     rtt_s: float | None = None
     healthy: bool = True
+    effective_per_slot: float = 0.0  # set by decide(): rate after per-task startup cost
 
     @property
     def rate(self) -> float:
-        return (self.rate_per_slot or 0.0) * self.slots
+        return (self.effective_per_slot or self.rate_per_slot or 0.0) * self.slots
 
 
 @dataclass
@@ -68,11 +72,17 @@ def decide(est: Estimate, nodes: list[Node], mode: str = "auto") -> Decision:
     local = next((n for n in nodes if n.is_local and n.healthy and n.rate_per_slot), None)
     remotes = [n for n in nodes if not n.is_local and n.healthy and n.rate_per_slot]
     reasons: list[str] = []
+    per_task = est.work_units / max(1, est.task_count)
+    for n in [local, *remotes]:
+        if n is None:
+            continue
+        startup = 0.0 if n.rate_source == "observed" else TASK_STARTUP_S
+        n.effective_per_slot = per_task / (per_task / n.rate_per_slot + startup)  # type: ignore[operator]
 
     t_local = None
     if local:
-        tail = (est.work_units / max(1, est.task_count)) / local.rate_per_slot  # type: ignore[operator]
-        t_local = STARTUP_LOCAL_S + est.work_units / local.rate + 0.5 * tail
+        tail = per_task / local.effective_per_slot
+        t_local = STARTUP_LOCAL_S + est.work_units / local.rate + 0.5 * tail + est.merge_s
         reasons.append(f"This laptop alone: {local.slots} slots -> about {_fmt(t_local)}")
 
     t_dist = None
@@ -93,10 +103,11 @@ def decide(est: Estimate, nodes: list[Node], mode: str = "auto") -> Decision:
         remote_tasks = est.task_count * remote_share
         remote_slots = sum(n.slots for n in remotes)
         t_rtt = remote_tasks * ROUND_TRIPS_PER_TASK * rtt / max(1, remote_slots)
-        slowest = min(n.rate_per_slot for n in pool)  # type: ignore[type-var]
-        tail = (est.work_units / max(1, est.task_count)) / slowest  # type: ignore[operator]
+        slowest = min(n.effective_per_slot for n in pool)
+        tail = per_task / slowest
         t_compute = est.work_units / total_rate
-        t_dist = (STARTUP_DIST_S + t_compute + t_transfer + t_rtt + 0.5 * tail) * (1 + WIFI_RISK)
+        t_dist = ((STARTUP_DIST_S + t_compute + t_transfer + t_rtt + 0.5 * tail)
+                  * (1 + WIFI_RISK) + est.merge_s)
         reasons.append(f"With {len(remotes)} other laptop(s): compute {_fmt(t_compute)}, "
                        f"moving {moved / 1e6:.1f} MB {_fmt(t_transfer)}, "
                        f"round trips {_fmt(t_rtt)} -> about {_fmt(t_dist)}")

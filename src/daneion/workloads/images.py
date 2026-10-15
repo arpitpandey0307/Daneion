@@ -149,7 +149,7 @@ class ImageBatch(Workload):
             task_count=math.ceil(len(files) / params["batch"]),
             bytes_in=float(sum(f["size"] for f in files)),
             bytes_out=len(files) * thumb * thumb * 1.2,
-            quality=0.9, note=f"{len(files)} images",
+            quality=0.9, note=f"{len(files)} images", merge_s=0.004 * len(files),
             task_units=[sum(f["w"] * f["h"] for f in t["files"]) / 1e6
                         for t in self.split(params)])
 
