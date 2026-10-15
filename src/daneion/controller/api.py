@@ -162,7 +162,7 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
                   "revoke": WorkerState.REVOKED}
         if action not in states:
             raise errors.NotFound("action")
-        ctl.set_worker_state(worker_id, states[action])
+        ctl.set_worker_state(ctl.find_worker(worker_id), states[action])
         return {"ok": True}
 
     @api.post("/jobs", status_code=201)
@@ -196,9 +196,17 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
         return ctl.events_since(after, job_id, min(max(limit, 1), 5000))
 
     @api.get("/events/stream")
-    async def event_stream(request: Request, after: int = 0) -> StreamingResponse:
+    async def event_stream(request: Request, after: int | None = None) -> StreamingResponse:
+        resume = request.headers.get("last-event-id", "")
+        if resume.isdigit():
+            start = int(resume)  # browser reconnect: continue exactly where it stopped
+        elif after is not None:
+            start = after
+        else:
+            start = await run_in_threadpool(ctl.last_event_id)  # live tail only
+
         async def gen():  # type: ignore[no-untyped-def]
-            last = after
+            last = start
             yield "retry: 2000\n\n"
             while not await request.is_disconnected():
                 batch = await run_in_threadpool(ctl.events_since, last)

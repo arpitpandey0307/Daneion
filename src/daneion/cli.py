@@ -42,7 +42,13 @@ def _local_worker_token(ctl: object, cfg: ControllerConfig, slots: int) -> str:
 
 
 def _serve_in_thread(server: Any, name: str) -> threading.Thread:
-    t = threading.Thread(target=server.run, name=name, daemon=True)
+    def run() -> None:
+        try:
+            server.run()
+        except SystemExit:  # uvicorn exits this way when it cannot bind; caller reports it
+            pass
+
+    t = threading.Thread(target=run, name=name, daemon=True)
     t.start()
     return t
 
@@ -74,7 +80,17 @@ def cmd_controller(args: argparse.Namespace) -> int:
             create_app(ctl, role="lan"), host=cfg.lan_host, port=cfg.lan_port,
             ssl_certfile=str(cert), ssl_keyfile=str(key), log_level="warning",
             timeout_keep_alive=60))
-        _serve_in_thread(lan_server, "lan-listener")
+        lan_thread = _serve_in_thread(lan_server, "lan-listener")
+        for _ in range(100):  # uvicorn exits its thread quietly when the port is taken
+            if lan_server.started or not lan_thread.is_alive():
+                break
+            time.sleep(0.05)
+        if not lan_server.started:
+            print(f"ERROR: cannot listen for workers on {cfg.lan_host}:{cfg.lan_port} "
+                  "(port in use? another controller running?). Use --lan-port or --no-lan.",
+                  file=sys.stderr)
+            ctl.stop_background()
+            return 2
 
     console = Path(args.console_dir) if args.console_dir else _find_console()
     server = uvicorn.Server(uvicorn.Config(create_app(ctl, console, lan_info=lan_info),
@@ -236,6 +252,14 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 def cmd_workers(args: argparse.Namespace) -> int:
     with httpx.Client(base_url=args.controller, timeout=10) as http:
+        for action, target in (("revoke", args.revoke), ("pause", args.pause),
+                               ("resume", args.resume)):
+            if target:
+                r = http.post(f"/api/v1/workers/{target}/{action}")
+                if r.status_code >= 400:
+                    print(r.json()["error"]["message"], file=sys.stderr)
+                    return 1
+                print(f"{action}d {target}")
         workers = http.get("/api/v1/workers").json()
     for w in workers:
         caps = w["capabilities"]
@@ -324,6 +348,9 @@ def main(argv: list[str] | None = None) -> int:
 
     ws = sub.add_parser("workers", help="list laptops in the cluster")
     ws.add_argument("--controller", default=CONSOLE_URL)
+    ws.add_argument("--revoke", metavar="NAME_OR_ID", help="remove a laptop (frees its slot)")
+    ws.add_argument("--pause", metavar="NAME_OR_ID", help="stop giving this laptop new work")
+    ws.add_argument("--resume", metavar="NAME_OR_ID")
     ws.set_defaults(fn=cmd_workers)
 
     fw = sub.add_parser("firewall", help="show how to let other laptops reach this controller")

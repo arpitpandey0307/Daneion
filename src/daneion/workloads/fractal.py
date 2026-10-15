@@ -31,6 +31,8 @@ PRESETS: dict[str, dict[str, Any]] = {
              "center_x": -0.7453, "center_y": 0.1127, "scale": 5.0e-6},
 }
 
+MAX_PIXELS = 4096 * 4096  # the merged RGB image is held in memory on the controller
+
 LIMITS = {
     "width": (64, 8192),
     "height": (64, 8192),
@@ -47,7 +49,8 @@ def _palette() -> list[tuple[int, int, int]]:
     for (a, ca), (b, cb) in zip(stops, stops[1:], strict=False):
         for i in range(a, b):
             t = (i - a) / (b - a)
-            out.append(tuple(round(ca[k] + (cb[k] - ca[k]) * t) for k in range(3)))  # type: ignore[misc]
+            red, green, blue = (round(ca[k] + (cb[k] - ca[k]) * t) for k in range(3))
+            out.append((red, green, blue))
     out.append(stops[-1][1])
     return out
 
@@ -71,6 +74,8 @@ class FractalTiles(Workload):
             p[key] = float(p[key])
         if not p["scale"] > 0:
             raise WorkloadError("scale must be > 0")
+        if p["width"] * p["height"] > MAX_PIXELS:
+            raise WorkloadError(f"image too large: at most {MAX_PIXELS:,} pixels")
         return p
 
     def split(self, params: dict[str, Any]) -> list[dict[str, Any]]:

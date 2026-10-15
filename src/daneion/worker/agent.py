@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -42,7 +43,7 @@ class StaleLease(Exception):
 class WorkerAgent:
     def __init__(self, base_url: str, token: str, *, name: str | None = None,
                  slots: int | None = None, work_dir: Path | None = None,
-                 verify: bool | str = True, task_timeout_s: float = 900.0,
+                 verify: bool | str | ssl.SSLContext = True, task_timeout_s: float = 900.0,
                  client: httpx.Client | None = None) -> None:
         self.slots = slots or default_slots()
         self.name = name
@@ -138,6 +139,12 @@ class WorkerAgent:
             try:
                 reply = self._post("/api/v1/worker/heartbeat", {"attempts": live})
             except (httpx.HTTPError, StaleLease) as exc:
+                if (isinstance(exc, httpx.HTTPStatusError)
+                        and exc.response.status_code == 401):
+                    log.error("controller revoked this laptop; stopping all work")
+                    self.stop()
+                    self._kill_all()
+                    return
                 log.warning("heartbeat failed: %s", exc)
                 continue
             for attempt_id in reply.get("stop", []):

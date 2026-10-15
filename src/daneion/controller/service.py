@@ -169,6 +169,17 @@ class Controller:
         return {"code": f"{raw[:4]}-{raw[4:]}", "expires_at": expires,
                 "ttl_s": self.cfg.pairing_ttl_s}
 
+    def _check_room(self, name: str) -> None:
+        """Raise ClusterFull unless a new laptop (or a re-pair of `name`) fits under the cap."""
+        with self.db.read() as s:
+            active = s.scalars(select(Worker).where(Worker.state != WorkerState.REVOKED)).all()
+        replaceable = sum(1 for w in active if w.name == name and not w.is_local)
+        if len(active) - replaceable >= self.cfg.max_nodes:
+            lost = [w.name for w in active if w.state == WorkerState.LOST]
+            hint = f" Revoke a lost laptop first: {', '.join(lost)}." if lost else ""
+            raise errors.ClusterFull(
+                f"cluster already has {len(active)} of {self.cfg.max_nodes} laptops.{hint}")
+
     def pairing_status(self) -> dict[str, Any]:
         with self._pair_lock:
             p = self._pairing
@@ -201,8 +212,9 @@ class Controller:
                     self._event(s, "pairing.failed", f"Pairing failed from {client_ip}: {reason}")
                 self._notify_events()
                 raise errors.PairingFailed(reason)
+            name = (name.strip() or client_ip)[:64]
+            self._check_room(name)  # before burning the code, so a full cluster keeps it valid
             self._pairing = None  # single use
-        name = (name.strip() or client_ip)[:64]
         with self.db.tx() as s:
             # Re-pairing the same laptop replaces its old identity instead of using a new slot.
             for old in s.scalars(select(Worker).where(
@@ -238,6 +250,19 @@ class Controller:
             if os_name is not None:
                 w.os = os_name
             w.version += 1
+
+    def find_worker(self, id_or_name: str) -> str:
+        with self.db.read() as s:
+            w = s.get(Worker, id_or_name) or s.scalar(
+                select(Worker).where(Worker.name == id_or_name,
+                                     Worker.state != WorkerState.REVOKED))
+            if w is None:
+                raise errors.NotFound(f"no worker {id_or_name!r}")
+            return w.id
+
+    def last_event_id(self) -> int:
+        with self.db.read() as s:
+            return s.scalar(select(func.max(EventRow.id))) or 0
 
     def set_worker_state(self, worker_id: str, state: WorkerState) -> None:
         """Owner controls: PAUSED stops new leases, REVOKED also invalidates the token."""
@@ -366,12 +391,15 @@ class Controller:
     def _lease(self, worker: Worker, free_slots: int) -> list[dict]:
         if free_slots <= 0:
             with self.db.tx() as s:
-                self._touch(s, worker)
+                if self._touch(s, worker).state == WorkerState.REVOKED:
+                    raise errors.Unauthorized("worker was revoked")
             return []
         now = self.clock()
         out: list[dict] = []
         with self.db.tx() as s:
             w = self._touch(s, worker)
+            if w.state == WorkerState.REVOKED:
+                raise errors.Unauthorized("worker was revoked")  # ends a waiting long-poll
             if w.state != WorkerState.ONLINE:
                 return []
             q = (select(Task, Job).join(Job, Job.id == Task.job_id)

@@ -51,6 +51,16 @@ def _generate(cert_path: Path, key_path: Path) -> None:
             .not_valid_after(now + dt.timedelta(days=825))
             .add_extension(san, critical=False)
             .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, key_cert_sign=True, crl_sign=False,
+                content_commitment=False, key_encipherment=False, data_encipherment=False,
+                key_agreement=False, encipher_only=False, decipher_only=False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.SERVER_AUTH]),
+                           critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+                           critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()),
+                           critical=False)
             .sign(key, hashes.SHA256()))
     key_pem = key.private_bytes(serialization.Encoding.PEM,
                                 serialization.PrivateFormat.PKCS8,
@@ -78,4 +88,7 @@ def pinned_context(cert_pem_path: Path) -> ssl.SSLContext:
     ctx = ssl.create_default_context(cafile=str(cert_pem_path))
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_REQUIRED
+    # Python 3.13 turns on strict X.509 checks by default; certificates created by older
+    # Daneion builds lack some extensions. The exact-certificate pin is the trust anchor here.
+    ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
     return ctx

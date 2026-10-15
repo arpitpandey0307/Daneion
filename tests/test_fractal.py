@@ -52,3 +52,15 @@ def test_unknown_workload_is_rejected() -> None:
 def test_presets_are_valid() -> None:
     for params in wl.presets.values():
         wl.validate(params)
+
+
+def test_huge_image_is_rejected() -> None:
+    with pytest.raises(WorkloadError, match="too large"):
+        wl.validate({"width": 8192, "height": 8192})
+
+
+def test_palette_is_valid_rgb() -> None:
+    from daneion.workloads.fractal import _palette
+
+    pal = _palette()
+    assert len(pal) == 256 and all(0 <= c <= 255 for rgb in pal for c in rgb)

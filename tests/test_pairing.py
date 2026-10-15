@@ -83,3 +83,27 @@ def test_pairing_endpoint_returns_join_command(ctl: Controller) -> None:
                                     "addresses": ["192.168.43.10"]})
     info = TestClient(app, base_url="http://127.0.0.1:8750").post("/api/v1/pairing").json()
     assert info["command"] == f"daneion join 192.168.43.10 {info['code']} --fp {'ab' * 8}"
+
+
+def test_full_cluster_keeps_pairing_code_valid(ctl: Controller) -> None:
+    for i in range(ctl.cfg.max_nodes):
+        ctl.register_worker(f"n{i}")
+    code = ctl.open_pairing()["code"]
+    with pytest.raises(errors.ClusterFull):
+        ctl.pair(code, "sixth", client_ip="10.0.0.6")
+    ctl.set_worker_state(ctl.find_worker("n0"), "REVOKED")  # type: ignore[arg-type]
+    ctl.pair(code, "sixth", client_ip="10.0.0.6")  # same code still works once room exists
+
+
+def test_full_cluster_still_allows_re_pairing_existing_laptop(ctl: Controller) -> None:
+    for i in range(ctl.cfg.max_nodes):
+        ctl.register_worker(f"n{i}")
+    ctl.pair(ctl.open_pairing()["code"], "n3", client_ip="10.0.0.3")
+
+
+def test_revoke_by_name_through_console(ctl: Controller) -> None:
+    ctl.register_worker("omen")
+    http = TestClient(create_app(ctl), base_url="http://127.0.0.1:8750")
+    assert http.post("/api/v1/workers/omen/revoke").status_code == 200
+    assert [w["state"] for w in ctl.list_workers()] == ["REVOKED"]
+    assert http.post("/api/v1/workers/omen/revoke").status_code == 404
