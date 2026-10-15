@@ -1,0 +1,51 @@
+# --- Plans, specs, ADRs and other docs: kept local, never committed (only real code goes to GitHub) ---
+Context/
+task/
+docs/
+*.docx
+*.pdf
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# --- JS / TS ---
+node_modules/
+.next/
+.vite/
+coverage/
+
+# --- Runtime data & secrets (never commit) ---
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+data/
+artifacts/
+certs/
+*.pem
+*.key
+*.crt
+*.token
+logs/
+*.log
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
