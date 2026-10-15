@@ -95,6 +95,7 @@ def cmd_controller(args: argparse.Namespace) -> int:
         print(f"  Workers join over TLS on:   {ips} port {cfg.lan_port}")
         print(f"  Certificate fingerprint:    {lan_info['fingerprint']}")
         print("  To add a laptop:            daneion pair")
+        print("  Other laptops can't connect? daneion firewall")
     try:
         server.run()
     finally:
@@ -245,6 +246,35 @@ def cmd_workers(args: argparse.Namespace) -> int:
     return 0
 
 
+FIREWALL_HELP = """\
+Windows blocks incoming connections on networks marked "Public" (most Wi-Fi and hotspots).
+On the CONTROLLER laptop, open PowerShell as Administrator once and run:
+
+  Get-NetConnectionProfile | Where-Object NetworkCategory -eq Public |
+    Set-NetConnectionProfile -NetworkCategory Private
+  New-NetFirewallRule -DisplayName "Daneion workers (TCP {port})" -Direction Inbound `
+    -Protocol TCP -LocalPort {port} -Action Allow -Profile Private
+
+Workers only make outgoing connections, so worker laptops need no firewall change.
+Also avoid campus/guest Wi-Fi: it often blocks laptop-to-laptop traffic (client isolation).
+Use a phone hotspot or your own router.
+"""
+
+
+def cmd_firewall(args: argparse.Namespace) -> int:
+    print(FIREWALL_HELP.format(port=args.lan_port))
+    if sys.platform == "win32":
+        import subprocess
+
+        out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                              "Get-NetConnectionProfile | ForEach-Object "
+                              "{ $_.InterfaceAlias + ': ' + $_.NetworkCategory }"],
+                             capture_output=True, text=True, check=False).stdout.strip()
+        if out:
+            print("Current network profile(s):\n  " + out.replace("\n", "\n  "))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="daneion", description="LAN compute sharing")
     p.add_argument("--version", action="version", version=__version__)
@@ -296,9 +326,16 @@ def main(argv: list[str] | None = None) -> int:
     ws.add_argument("--controller", default=CONSOLE_URL)
     ws.set_defaults(fn=cmd_workers)
 
+    fw = sub.add_parser("firewall", help="show how to let other laptops reach this controller")
+    fw.add_argument("--lan-port", type=int, default=8751)
+    fw.set_defaults(fn=cmd_firewall)
+
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     return int(args.fn(args))
 
 

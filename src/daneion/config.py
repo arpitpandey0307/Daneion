@@ -23,7 +23,7 @@ class ControllerConfig:
     max_nodes: int = 5  # ADR-0019: includes the controller's own local worker
     heartbeat_interval_s: float = 3.0
     suspect_after_missed: int = 3
-    lease_ttl_s: float = 30.0
+    lease_ttl_s: float = 15.0  # 5 missed heartbeats; short so an unplugged laptop is noticed fast
     long_poll_s: float = 20.0
     max_attempts: int = 3
     retry_base_s: float = 1.0

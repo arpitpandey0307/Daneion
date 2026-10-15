@@ -191,8 +191,9 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
         return FileResponse(path, filename=path.name)
 
     @api.get("/events")
-    def events(after: int = 0, job_id: str | None = None) -> list[dict[str, Any]]:
-        return ctl.events_since(after, job_id)
+    def events(after: int = 0, job_id: str | None = None,
+               limit: int = 500) -> list[dict[str, Any]]:
+        return ctl.events_since(after, job_id, min(max(limit, 1), 5000))
 
     @api.get("/events/stream")
     async def event_stream(request: Request, after: int = 0) -> StreamingResponse:
