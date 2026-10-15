@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from daneion.workloads.base import Workload, WorkloadError
+from daneion.workloads.base import Estimate, Workload, WorkloadError
 from daneion.workloads.fractal import FractalTiles
+from daneion.workloads.images import ImageBatch
 
-REGISTRY: dict[str, Workload] = {w.name: w for w in (FractalTiles(),)}
+REGISTRY: dict[str, Workload] = {w.name: w for w in (FractalTiles(), ImageBatch())}
 
 
 def get_workload(name: str) -> Workload:
@@ -15,4 +16,4 @@ def get_workload(name: str) -> Workload:
         raise WorkloadError(f"unknown workload: {name!r}") from None
 
 
-__all__ = ["REGISTRY", "Workload", "WorkloadError", "get_workload"]
+__all__ = ["REGISTRY", "Estimate", "Workload", "WorkloadError", "get_workload"]

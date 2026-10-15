@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -56,6 +57,13 @@ class PairIn(BaseModel):
     capabilities: dict[str, Any] = Field(default_factory=dict)
 
 
+class BenchIn(BaseModel):
+    handler: str = Field(min_length=1, max_length=64)
+    params: dict[str, Any] = Field(default_factory=dict)
+    runs: int = Field(default=5, ge=1, le=20)
+    warmup: int = Field(default=1, ge=0, le=3)
+
+
 class AttemptRef(BaseModel):
     attempt_id: str
     fence: int
@@ -77,6 +85,8 @@ WorkerDep = Annotated[Worker, Depends(current_worker)]
 
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+PROBE_MAX = 8 * 1024 * 1024
+_PROBE = os.urandom(PROBE_MAX)  # incompressible, so link compression cannot flatter the result
 
 
 def _host_only(value: str) -> str:
@@ -190,6 +200,22 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
         path = ctl.job_result(job_id)
         return FileResponse(path, filename=path.name)
 
+    @api.post("/benchmarks", status_code=201)
+    def start_benchmark(body: BenchIn) -> dict[str, Any]:
+        return ctl.start_benchmark(body.handler, body.params, body.runs, body.warmup)
+
+    @api.get("/benchmarks")
+    def benchmarks() -> list[dict[str, Any]]:
+        return ctl.list_benchmarks()
+
+    @api.get("/benchmarks/{bench_id}")
+    def benchmark(bench_id: str) -> dict[str, Any]:
+        return ctl.get_benchmark(bench_id)
+
+    @api.post("/benchmarks/{bench_id}/cancel")
+    def cancel_benchmark(bench_id: str) -> dict[str, Any]:
+        return ctl.cancel_benchmark(bench_id)
+
     @api.get("/events")
     def events(after: int = 0, job_id: str | None = None,
                limit: int = 500) -> list[dict[str, Any]]:
@@ -269,6 +295,25 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
     def fail(attempt_id: str, body: FailIn, worker: WorkerDep) -> dict[str, Any]:
         ctl.fail(worker, attempt_id, body.fence, body.error_class, body.message)
         return {"ok": True}
+
+    @wk.get("/attempts/{attempt_id}/inputs/{sha}")
+    def attempt_input(attempt_id: str, sha: str, fence: int, worker: WorkerDep) -> FileResponse:
+        return FileResponse(ctl.input_path(worker, attempt_id, fence, sha),
+                            media_type="application/octet-stream")
+
+    @wk.get("/netprobe")
+    def netprobe_down(worker: WorkerDep, size: int = 1_000_000) -> Response:
+        size = min(max(size, 1), PROBE_MAX)
+        return Response(content=_PROBE[:size], media_type="application/octet-stream")
+
+    @wk.post("/netprobe")
+    async def netprobe_up(request: Request, worker: WorkerDep) -> dict[str, Any]:
+        n = 0
+        async for chunk in request.stream():
+            n += len(chunk)
+            if n > PROBE_MAX:
+                raise errors.InvalidRequest("probe too large")
+        return {"received": n}
 
     @wk.post("/pair")
     def pair(body: PairIn, request: Request) -> dict[str, Any]:

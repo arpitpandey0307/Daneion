@@ -3,16 +3,21 @@
 Tiny input, heavy CPU per byte, bit-for-bit deterministic output (pure Python IEEE-754 doubles),
 so it is the workload that can show a real distributed speedup over Wi-Fi (ADR-0013).
 Each task returns the raw iteration counts of its tile as little-endian uint16.
+
+Work is measured in "units" = (iterations + PIXEL_COST * pixels) / 1e6, which tracks CPU time
+far better than pixel counts because the cost per pixel varies by four orders of magnitude.
 """
 
 from __future__ import annotations
 
 import io
 import sys
+import time
 from array import array
+from pathlib import Path
 from typing import Any
 
-from daneion.workloads.base import Workload, WorkloadError
+from daneion.workloads.base import Estimate, Workload, WorkloadError
 
 DEFAULTS: dict[str, Any] = {
     "width": 1280,
@@ -40,6 +45,11 @@ LIMITS = {
     "max_iter": (16, 65535),
 }
 
+PIXEL_COST = 12  # per-pixel loop overhead, expressed in equivalent iterations
+SAMPLE_STEP = 24  # estimate() renders every 24th pixel in each direction (~1/576 of the work)
+CALIBRATION = {"width": 640, "height": 400, "x0": 300, "y0": 180, "tw": 40, "th": 40,
+               "center_x": -0.7453, "center_y": 0.1127, "scale": 5.0e-6, "max_iter": 2000}
+
 
 def _palette() -> list[tuple[int, int, int]]:
     # Smooth deep-blue -> cyan -> amber -> white ramp, 256 entries.
@@ -53,6 +63,35 @@ def _palette() -> list[tuple[int, int, int]]:
             out.append((red, green, blue))
     out.append(stops[-1][1])
     return out
+
+
+def _render(task: dict[str, Any], step: int = 1) -> array:
+    """Iteration counts for every `step`-th pixel of the task's tile, row-major."""
+    W, H = task["width"], task["height"]
+    cx, cy = task["center_x"], task["center_y"]
+    scale, max_iter = task["scale"], task["max_iter"]
+    out = array("H")
+    half_w, half_h = W / 2, H / 2
+    for py in range(task["y0"], task["y0"] + task["th"], step):
+        ci = cy + (py - half_h) * scale
+        for px in range(task["x0"], task["x0"] + task["tw"], step):
+            cr = cx + (px - half_w) * scale
+            zr = zi = 0.0
+            n = 0
+            while n < max_iter:
+                zr2 = zr * zr
+                zi2 = zi * zi
+                if zr2 + zi2 > 4.0:
+                    break
+                zi = 2.0 * zr * zi + ci
+                zr = zr2 - zi2 + cr
+                n += 1
+            out.append(n)
+    return out
+
+
+def _units(counts: array) -> float:
+    return (sum(counts) + PIXEL_COST * len(counts)) / 1e6
 
 
 class FractalTiles(Workload):
@@ -90,27 +129,8 @@ class FractalTiles(Workload):
                 })
         return tasks
 
-    def run(self, task: dict[str, Any]) -> bytes:
-        W, H = task["width"], task["height"]
-        cx, cy = task["center_x"], task["center_y"]
-        scale, max_iter = task["scale"], task["max_iter"]
-        out = array("H")
-        half_w, half_h = W / 2, H / 2
-        for py in range(task["y0"], task["y0"] + task["th"]):
-            ci = cy + (py - half_h) * scale
-            for px in range(task["x0"], task["x0"] + task["tw"]):
-                cr = cx + (px - half_w) * scale
-                zr = zi = 0.0
-                n = 0
-                while n < max_iter:
-                    zr2 = zr * zr
-                    zi2 = zi * zi
-                    if zr2 + zi2 > 4.0:
-                        break
-                    zi = 2.0 * zr * zi + ci
-                    zr = zr2 - zi2 + cr
-                    n += 1
-                out.append(n)
+    def run(self, task: dict[str, Any], inputs: dict[str, Path] | None = None) -> bytes:
+        out = _render(task)
         if sys.byteorder != "little":
             out.byteswap()
         return out.tobytes()
@@ -144,10 +164,25 @@ class FractalTiles(Workload):
         img.save(buf, format="PNG", optimize=False)
         return buf.getvalue(), "fractal.png"
 
-    def estimate(self, params: dict[str, Any]) -> dict[str, float]:
+    def estimate(self, params: dict[str, Any]) -> Estimate:
+        """Render a sparse grid of every tile (~0.2% of the work) and scale it up."""
+        tasks = self.split(params)
+        per_task, sampled = [], 0
+        for t in tasks:
+            sample = _render(t, SAMPLE_STEP)
+            sampled += len(sample)
+            per_task.append(_units(sample) * t["tw"] * t["th"] / max(1, len(sample)))
         pixels = params["width"] * params["height"]
-        return {
-            "work_units": pixels * params["max_iter"] / 1e6,
-            "bytes_in": 512.0 * len(self.split(params)),
-            "bytes_out": pixels * 2.0,
-        }
+        units = sum(per_task)
+        return Estimate(
+            work_units=units, task_count=len(tasks), task_units=per_task,
+            bytes_in=600.0 * len(tasks),  # the lease JSON per tile
+            bytes_out=pixels * 2.0,
+            # Sparse sampling misses thin filaments; well within FitCheck's 15 % margin.
+            quality=0.85,
+            note=f"sampled {sampled:,} of {pixels:,} pixels")
+
+    def calibrate(self) -> float:
+        t0 = time.perf_counter()
+        counts = _render(CALIBRATION)
+        return _units(counts) / (time.perf_counter() - t0)

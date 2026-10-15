@@ -3,11 +3,37 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Protocol
 
 
 class WorkloadError(ValueError):
     """Bad parameters or output. Never retryable."""
+
+
+@dataclass
+class Estimate:
+    """What FitCheck needs to know about a job before running it."""
+
+    work_units: float  # comparable with calibrate(): units / (units per second) = seconds
+    task_count: int
+    bytes_in: float  # bytes every task needs from the controller, summed over all tasks
+    bytes_out: float  # result bytes sent back, summed
+    quality: float  # 0..1, how much to trust work_units
+    note: str = ""
+    task_units: list[float] | None = None  # per task, same order as split()
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class InputStore(Protocol):
+    """Content-addressed store on the controller (ART-01/ART-10)."""
+
+    def put_file(self, path: Path) -> tuple[str, int]:
+        """Copy a file in; return (sha256, size)."""
+        ...
 
 
 class Workload(ABC):
@@ -20,13 +46,22 @@ class Workload(ABC):
     def validate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return normalised job parameters or raise WorkloadError."""
 
+    def prepare(self, params: dict[str, Any], store: InputStore) -> dict[str, Any]:
+        """Controller-side ingestion of input files (default: none)."""
+        return params
+
     @abstractmethod
     def split(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Split validated job parameters into independent task parameters."""
 
+    def input_refs(self, task: dict[str, Any]) -> list[str]:
+        """SHA-256 of every stored input this task reads (the worker downloads these)."""
+        return []
+
     @abstractmethod
-    def run(self, task: dict[str, Any]) -> bytes:
-        """Execute one task. Must be deterministic: same input, same bytes."""
+    def run(self, task: dict[str, Any], inputs: dict[str, Path] | None = None) -> bytes:
+        """Execute one task. Must be deterministic: same input, same bytes.
+        `inputs` maps each sha256 from input_refs() to a verified local file."""
 
     @abstractmethod
     def verify(self, task: dict[str, Any], output: bytes) -> None:
@@ -36,6 +71,11 @@ class Workload(ABC):
     def merge(self, params: dict[str, Any], outputs: list[bytes]) -> tuple[bytes, str]:
         """Combine task outputs (in task order) into (result bytes, file name)."""
 
-    def estimate(self, params: dict[str, Any]) -> dict[str, float]:
-        """Rough per-job sizes used by FitCheck: work units and bytes in/out."""
-        return {"work_units": 1.0, "bytes_in": 0.0, "bytes_out": 0.0}
+    @abstractmethod
+    def estimate(self, params: dict[str, Any]) -> Estimate:
+        """Predict the job's size for FitCheck (called on the controller after prepare)."""
+
+    @abstractmethod
+    def calibrate(self) -> float:
+        """Single-core speed of this machine for this workload, in work units per second.
+        Must finish in well under a second."""

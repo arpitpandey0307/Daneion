@@ -1,7 +1,8 @@
 """Child-process entry point: `python -m daneion.workloads.runner <task_dir>`.
 
 Reads task.json from the private task directory, writes output.bin atomically.
-Exit codes: 0 ok, 2 invalid task (never retry), 1 any other error (unknown => not retried).
+Exit codes: 0 ok, 2 invalid task (never retry), 3 hit the memory cap, 1 any other error
+(unknown => not retried).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from pathlib import Path
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INVALID = 2
+EXIT_RESOURCE = 3
 
 
 def main(argv: list[str]) -> int:
@@ -27,8 +29,12 @@ def main(argv: list[str]) -> int:
     try:
         spec = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
         workload = get_workload(spec["handler"])
-        output = workload.run(spec["params"])
+        inputs = {sha: Path(p) for sha, p in (spec.get("inputs") or {}).items()}
+        output = workload.run(spec["params"], inputs)
         workload.verify(spec["params"], output)
+    except MemoryError:
+        print("task exceeded its memory cap", file=sys.stderr)
+        return EXIT_RESOURCE
     except (WorkloadError, KeyError, json.JSONDecodeError) as exc:
         print(f"invalid task: {exc}", file=sys.stderr)
         return EXIT_INVALID

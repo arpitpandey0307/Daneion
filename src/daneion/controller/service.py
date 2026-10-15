@@ -23,8 +23,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from daneion.config import ControllerConfig
-from daneion.controller import errors
-from daneion.controller.db import Attempt, Database, EventRow, Job, Task, Worker
+from daneion.controller import errors, fitcheck
+from daneion.controller.db import Attempt, Benchmark, Database, EventRow, Job, Task, Worker
 from daneion.controller.states import (
     ATTEMPT_LIVE,
     JOB_TERMINAL,
@@ -56,6 +56,36 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+class InputStore:
+    """Content-addressed input files on the controller: inputs/<sha256>."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir(parents=True, exist_ok=True)
+
+    def put_file(self, path: Path) -> tuple[str, int]:
+        h = hashlib.sha256()
+        tmp = self.root / f".{uuid.uuid4().hex}.tmp"
+        size = 0
+        with open(path, "rb") as src, open(tmp, "wb") as dst:
+            while chunk := src.read(1 << 20):
+                h.update(chunk)
+                dst.write(chunk)
+                size += len(chunk)
+        sha = h.hexdigest()
+        final = self.root / sha
+        if final.exists():
+            tmp.unlink()
+        else:
+            os.replace(tmp, final)
+        return sha, size
+
+    def path(self, sha: str) -> Path:
+        if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+            raise errors.InvalidRequest("bad input id")
+        return self.root / sha
+
+
 class Controller:
     def __init__(
         self,
@@ -76,6 +106,8 @@ class Controller:
         self._pair_lock = threading.Lock()
         self._pairing: dict[str, Any] | None = None  # {hash, expires_at, failures}
         self._pair_failures: dict[str, list[float]] = {}
+        self.inputs = InputStore(cfg.data_dir / "inputs")
+        self._bench_cancel: dict[str, threading.Event] = {}
 
     # ------------------------------------------------------------------ lifecycle
     def start_background(self) -> None:
@@ -298,32 +330,46 @@ class Controller:
         now = self.clock()
         job = Job(id=new_id("job"), handler=handler, params=params, mode=mode,
                   state=JobState.SUBMITTED, created_at=now, version=1, task_count=0)
-        with self.db.tx() as s:
-            s.add(job)
-            self._event(s, "job.submitted", f"{handler} submitted ({mode})", job_id=job.id)
-            self._set_job(job, JobState.VALIDATING)
-            try:
-                workload = get_workload(handler)
-                normalised = workload.validate(params)
-                task_params = workload.split(normalised)
-            except WorkloadError as exc:
+        # Validation, input ingestion and the FitCheck estimate can take a moment (hashing
+        # photos, sampling the fractal), so they run before taking the database write lock.
+        try:
+            workload = get_workload(handler)
+            normalised = workload.prepare(workload.validate(params), self.inputs)
+            task_params = workload.split(normalised)
+            est = workload.estimate(normalised)
+        except WorkloadError as exc:
+            with self.db.tx() as s:
+                s.add(job)
+                self._event(s, "job.submitted", f"{handler} submitted ({mode})", job_id=job.id)
+                self._set_job(job, JobState.VALIDATING)
                 self._set_job(job, JobState.REJECTED)
                 job.reason = str(exc)
                 job.finished_at = now
                 self._event(s, "job.rejected", str(exc), job_id=job.id)
-                return self._job_dict(s, job)
+                result = self._job_dict(s, job)
+            self._notify_events()
+            return result
+        decision = fitcheck.decide(est, self._nodes(handler), mode).as_dict()
+        decision["estimate"].pop("task_units", None)
+        units: list[float | None] = (list(est.task_units) if est.task_units
+                                     else [None] * len(task_params))
+        with self.db.tx() as s:
+            s.add(job)
+            self._event(s, "job.submitted", f"{handler} submitted ({mode})", job_id=job.id)
+            self._set_job(job, JobState.VALIDATING)
             job.params = normalised
             job.task_count = len(task_params)
             self._set_job(job, JobState.ADMITTED)
             self._set_job(job, JobState.FITCHECK)
-            decision = self._fitcheck(s, job, workload)
             job.placement = decision["placement"]
             job.fitcheck = decision
-            self._event(s, "job.fitcheck", decision["reason"], job_id=job.id, **decision)
+            self._event(s, "job.fitcheck", decision["reason"], job_id=job.id,
+                        placement=decision["placement"], gain=decision["predicted_gain"],
+                        confidence=decision["confidence"])
             for i, tp in enumerate(task_params):
                 s.add(Task(id=new_id("tsk"), job_id=job.id, idx=i, params=tp,
                            state=TaskState.QUEUED, attempts=0, fence=0, eligible_at=0.0,
-                           version=1))
+                           version=1, est_units=units[i]))
             self._set_job(job, JobState.QUEUED)
             self._event(s, "job.queued", f"{len(task_params)} tasks queued", job_id=job.id)
             result = self._job_dict(s, job)
@@ -331,22 +377,36 @@ class Controller:
         self._notify_events()
         return result
 
-    def _fitcheck(self, s: Session, job: Job, workload: Any) -> dict[str, Any]:
-        """Placeholder until FitCheck v0 (FIT tasks): honour explicit modes; for auto, use
-        remote laptops only when at least one is online."""
-        remote = s.scalar(select(func.count()).select_from(Worker).where(
-            Worker.is_local.is_(False), Worker.state == WorkerState.ONLINE)) or 0
-        if job.mode == "local":
-            return {"placement": "local", "reason": "Local run requested", "remote_workers": remote}
-        if job.mode == "distributed":
-            return {"placement": "distributed", "reason": "Distributed run requested",
-                    "remote_workers": remote}
-        if remote == 0:
-            return {"placement": "local", "reason": "No other laptop online: run locally",
-                    "remote_workers": 0}
-        return {"placement": "distributed",
-                "reason": f"{remote} other laptop(s) online: distribute",
-                "remote_workers": remote}
+    def _nodes(self, handler: str) -> list[fitcheck.Node]:
+        """FitCheck's view of each usable laptop: measured speed first, calibration second."""
+        with self.db.read() as s:
+            workers = s.scalars(select(Worker).where(Worker.state.in_(
+                [WorkerState.ONLINE, WorkerState.SUSPECT]))).all()
+        nodes = []
+        for w in workers:
+            caps = w.capabilities or {}
+            observed = (w.perf or {}).get(handler)
+            calibrated = (caps.get("calibration") or {}).get(handler)
+            if observed:
+                rate, source = float(observed), "observed"
+            elif calibrated:
+                rate = float(calibrated) * fitcheck.DEFAULT_PARALLEL_EFFICIENCY
+                source = "calibrated"
+            else:
+                rate, source = None, "default"
+            net = caps.get("net") or {}
+            bw = min(net.get("down_mbps") or 0, net.get("up_mbps") or 0) * 1e6 / 8 or None
+            nodes.append(fitcheck.Node(
+                name=w.name, is_local=w.is_local, slots=w.slots, rate_per_slot=rate,
+                rate_source=source, bandwidth_bps=bw,
+                rtt_s=(net["rtt_ms"] / 1000) if net.get("rtt_ms") else None,
+                healthy=w.state == WorkerState.ONLINE))
+        # A laptop that has not calibrated yet is assumed as fast as the slowest known one.
+        known = [n.rate_per_slot for n in nodes if n.rate_per_slot]
+        for n in nodes:
+            if n.rate_per_slot is None and known:
+                n.rate_per_slot = min(known)
+        return nodes
 
     def cancel_job(self, job_id: str) -> dict[str, Any]:
         with self.db.tx() as s:
@@ -406,7 +466,9 @@ class Controller:
                  .where(Task.state.in_([TaskState.QUEUED, TaskState.RETRY_WAIT]),
                         Task.eligible_at <= now,
                         Job.state.in_([JobState.QUEUED, JobState.RUNNING]))
-                 .order_by(Job.created_at, Task.idx))
+                 # Longest-processing-time first: big tiles start early, so the job does
+                 # not end waiting on one slow laptop finishing a heavy tile.
+                 .order_by(Job.created_at, Task.est_units.desc().nulls_last(), Task.idx))
             if not w.is_local:
                 q = q.where(Job.placement == "distributed")
             for task, job in s.execute(q.limit(free_slots)).all():
@@ -664,6 +726,7 @@ class Controller:
                     wall = job.finished_at - (job.started_at or job.created_at)
                     self._event(s, "job.succeeded", f"Done in {wall:.2f}s", job_id=job_id,
                                 wall_s=wall)
+                    self._learn_speed(s, job)
         except Exception as exc:
             log.exception("finalize %s failed", job_id)
             with self.db.tx() as s:
@@ -676,6 +739,156 @@ class Controller:
         finally:
             self._finalizing.discard(job_id)
             self._notify_events()
+
+    def _learn_speed(self, s: Session, job: Job) -> None:
+        """Per-slot speed each laptop actually delivered on this job (estimated work of the
+        tiles it finished / time it spent on them), blended into its history (EWMA)."""
+        rows = s.execute(
+            select(Attempt.worker_id, func.sum(Task.est_units), func.sum(Attempt.duration_s),
+                   func.count())
+            .join(Task, Task.id == Attempt.task_id)
+            .where(Attempt.job_id == job.id, Attempt.state == AttemptState.SUCCEEDED,
+                   Task.est_units.is_not(None), Attempt.duration_s > 0)
+            .group_by(Attempt.worker_id)).all()
+        for worker_id, units, busy, n in rows:
+            if n < 3 or not units or not busy:
+                continue  # too few tiles to say anything
+            w = s.get(Worker, worker_id)
+            if w is None:
+                continue
+            rate = units / busy
+            perf = dict(w.perf or {})
+            old = perf.get(job.handler)
+            perf[job.handler] = rate if not old else 0.5 * old + 0.5 * rate
+            w.perf = perf
+
+    def input_path(self, worker: Worker, attempt_id: str, fence: int, sha: str) -> Path:
+        """An input file, only for the current attempt of a task that actually needs it."""
+        with self.db.read() as s:
+            _, t = self._current(s, worker, attempt_id, fence)
+            job = s.get(Job, t.job_id)
+            assert job is not None
+            if sha not in get_workload(job.handler).input_refs(t.params):
+                raise errors.NotFound("input not part of this task")
+        path = self.inputs.path(sha)
+        if not path.exists():
+            raise errors.NotFound("input file missing on controller")
+        return path
+
+    # ------------------------------------------------------------------ benchmarks
+    def start_benchmark(self, handler: str, params: dict[str, Any], runs: int = 5,
+                        warmup: int = 1) -> dict[str, Any]:
+        """Proof-of-Speed: the same job alternately local-only and distributed (ABBA order
+        to cancel thermal drift), after `warmup` unmeasured runs of each mode."""
+        if not 1 <= runs <= 20 or not 0 <= warmup <= 3:
+            raise errors.InvalidRequest("runs must be 1-20 and warmup 0-3")
+        try:
+            get_workload(handler).validate(params)
+        except WorkloadError as exc:
+            raise errors.InvalidRequest(str(exc)) from None
+        with self.db.tx() as s:
+            busy = s.scalar(select(func.count()).select_from(Benchmark)
+                            .where(Benchmark.state == "RUNNING")) or 0
+            if busy:
+                raise errors.Conflict("a benchmark is already running")
+            b = Benchmark(id=new_id("bench"), handler=handler, params=params, runs=runs,
+                          warmup=warmup, state="RUNNING", created_at=self.clock(), results=[])
+            s.add(b)
+            self._event(s, "bench.started", f"Benchmark: {runs} measured runs per mode",
+                        bench_id=b.id)
+        cancel = threading.Event()
+        self._bench_cancel[b.id] = cancel
+        threading.Thread(target=self._run_benchmark, args=(b.id, cancel), daemon=True,
+                         name=f"bench-{b.id}").start()
+        self._notify_events()
+        return self.get_benchmark(b.id)
+
+    def cancel_benchmark(self, bench_id: str) -> dict[str, Any]:
+        ev = self._bench_cancel.get(bench_id)
+        if ev:
+            ev.set()
+        return self.get_benchmark(bench_id)
+
+    @staticmethod
+    def bench_order(runs: int, warmup: int) -> list[tuple[str, bool]]:
+        order = [(m, True) for _ in range(warmup) for m in ("local", "distributed")]
+        for i in range(runs):
+            pair = ("local", "distributed") if i % 2 == 0 else ("distributed", "local")
+            order += [(m, False) for m in pair]
+        return order
+
+    def _run_benchmark(self, bench_id: str, cancel: threading.Event) -> None:
+        with self.db.read() as s:
+            b = s.get(Benchmark, bench_id)
+            assert b is not None
+            handler, params, runs, warmup = b.handler, b.params, b.runs, b.warmup
+        results: list[dict[str, Any]] = []
+        state, error = "DONE", None
+        try:
+            for mode, is_warmup in self.bench_order(runs, warmup):
+                if cancel.is_set() or self._stop.is_set():
+                    state = "CANCELLED"
+                    break
+                job = self.submit_job(handler, params, mode)
+                while job["state"] not in ("SUCCEEDED", "FAILED", "CANCELLED", "REJECTED"):
+                    if cancel.wait(0.2):
+                        self.cancel_job(job["id"])
+                    job = self.get_job(job["id"])
+                if job["state"] != "SUCCEEDED":
+                    if cancel.is_set():
+                        state = "CANCELLED"
+                    else:
+                        state, error = "FAILED", f"{mode} run {job['id']}: {job['reason']}"
+                    break
+                fc = job["fitcheck"] or {}
+                key = "predicted_local_s" if mode == "local" else "predicted_distributed_s"
+                results.append({
+                    "mode": mode, "warmup": is_warmup, "job_id": job["id"],
+                    "wall_s": round(job["finished_at"] - job["created_at"], 3),
+                    "result_sha256": job["result_sha256"],
+                    "workers": [{"name": w["name"], "tasks": w["tasks"]}
+                                for w in job["per_worker"]],
+                    "predicted_s": fc.get(key)})
+                with self.db.tx() as s:
+                    b = s.get(Benchmark, bench_id)
+                    assert b is not None
+                    b.results = list(results)
+                    label = " (warm-up)" if is_warmup else ""
+                    self._event(s, "bench.run", f"{mode} run: {results[-1]['wall_s']:.1f}s{label}",
+                                bench_id=bench_id)
+                self._notify_events()
+        except Exception as exc:  # report it; never leave a benchmark stuck in RUNNING
+            log.exception("benchmark %s failed", bench_id)
+            state, error = "FAILED", str(exc)
+        report = benchmark_report(results) if results else None
+        with self.db.tx() as s:
+            b = s.get(Benchmark, bench_id)
+            assert b is not None
+            b.state, b.error, b.results, b.report = state, error, results, report
+            b.finished_at = self.clock()
+            if report and report.get("speedup"):
+                msg = f"Benchmark done: {report['speedup']:.2f}x"
+            else:
+                msg = f"Benchmark {state.lower()}"
+            self._event(s, "bench.finished", msg, bench_id=bench_id)
+        self._bench_cancel.pop(bench_id, None)
+        self._notify_events()
+
+    def get_benchmark(self, bench_id: str) -> dict[str, Any]:
+        with self.db.read() as s:
+            b = s.get(Benchmark, bench_id)
+            if b is None:
+                raise errors.NotFound("benchmark")
+            return {"id": b.id, "handler": b.handler, "params": b.params, "runs": b.runs,
+                    "warmup": b.warmup, "state": b.state, "created_at": b.created_at,
+                    "finished_at": b.finished_at, "results": b.results, "report": b.report,
+                    "error": b.error, "total_runs": len(self.bench_order(b.runs, b.warmup))}
+
+    def list_benchmarks(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.db.read() as s:
+            ids = s.scalars(select(Benchmark.id).order_by(Benchmark.created_at.desc())
+                            .limit(limit)).all()
+        return [self.get_benchmark(i) for i in ids]
 
     # ------------------------------------------------------------------ queries
     def _job_dict(self, s: Session, job: Job) -> dict[str, Any]:
@@ -741,6 +954,7 @@ class Controller:
                                   .group_by(Attempt.worker_id)).all())
             return [{"id": w.id, "name": w.name, "is_local": w.is_local, "state": w.state,
                      "os": w.os, "capabilities": w.capabilities, "slots": w.slots,
+                     "perf": w.perf or {},
                      "running": busy.get(w.id, 0), "completed": done.get(w.id, 0),
                      "last_seen_s": round(now - w.last_seen_at, 1)} for w in workers]
 
@@ -754,6 +968,33 @@ class Controller:
             return [{"id": e.id, "ts": e.ts, "kind": e.kind, "job_id": e.job_id,
                      "task_id": e.task_id, "worker_id": e.worker_id, "message": e.message,
                      "data": e.data} for e in rows]
+
+
+def benchmark_report(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Median/min/max per mode over measured runs, speedup, output agreement, FitCheck error."""
+    from statistics import median
+
+    out: dict[str, Any] = {"modes": {}}
+    for mode in ("local", "distributed"):
+        rows = [r for r in results if r["mode"] == mode and not r["warmup"]]
+        if not rows:
+            continue
+        walls = [r["wall_s"] for r in rows]
+        preds = [r["predicted_s"] for r in rows if r.get("predicted_s")]
+        med = median(walls)
+        out["modes"][mode] = {
+            "runs": len(walls), "median_s": round(med, 3), "min_s": round(min(walls), 3),
+            "max_s": round(max(walls), 3),
+            "predicted_s": round(median(preds), 2) if preds else None,
+            "prediction_error": round(median(preds) / med - 1, 3) if preds and med else None}
+    m = out["modes"]
+    if "local" in m and "distributed" in m and m["distributed"]["median_s"]:
+        out["speedup"] = round(m["local"]["median_s"] / m["distributed"]["median_s"], 3)
+        out["time_saved_s"] = round(m["local"]["median_s"] - m["distributed"]["median_s"], 2)
+    hashes = {r["result_sha256"] for r in results}
+    out["identical_outputs"] = len(hashes) == 1
+    out["result_sha256"] = next(iter(hashes)) if len(hashes) == 1 else None
+    return out
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

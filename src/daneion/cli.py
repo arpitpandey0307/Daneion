@@ -209,6 +209,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
     url = getattr(args, "controller", None) or creds["url"]
     agent = WorkerAgent(url, creds["token"], name=creds["name"],
                         slots=args.slots or creds.get("slots"),
+                        task_memory_mb=getattr(args, "task_mem_mb", 2048),
                         work_dir=d, verify=pinned_context(d / "controller.crt"))
     print(f"Worker {creds['name']} -> {url}  (Ctrl+C to leave)")
     try:
@@ -218,11 +219,26 @@ def cmd_worker(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_submit(args: argparse.Namespace) -> int:
+def _job_params(args: argparse.Namespace) -> dict[str, Any]:
     from daneion.workloads import get_workload
 
     params = dict(get_workload(args.handler).presets.get(args.preset, {}))
     params.update(json.loads(args.params) if args.params else {})
+    if getattr(args, "source", None):
+        params["source_dir"] = str(Path(args.source).resolve())
+    return params
+
+
+def _print_fitcheck(fc: dict[str, Any] | None) -> None:
+    if not fc:
+        return
+    print(f"FitCheck: {fc['reason']}")
+    for line in fc.get("reasons", []):
+        print(f"  - {line}")
+
+
+def cmd_submit(args: argparse.Namespace) -> int:
+    params = _job_params(args)
     with httpx.Client(base_url=args.controller, timeout=30) as http:
         r = http.post("/api/v1/jobs", json={"handler": args.handler, "params": params,
                                             "mode": args.mode})
@@ -230,9 +246,12 @@ def cmd_submit(args: argparse.Namespace) -> int:
             print(r.text, file=sys.stderr)
             return 1
         job = r.json()
-        reason = job["fitcheck"]["reason"] if job["fitcheck"] else ""
         print(f"{job['id']}  {job['state']}  placement={job['placement']}  "
-              f"tasks={job['task_count']}  ({reason})")
+              f"tasks={job['task_count']}")
+        _print_fitcheck(job["fitcheck"])
+        if job["state"] == "REJECTED":
+            print(f"Rejected: {job['reason']}", file=sys.stderr)
+            return 1
         if not args.wait:
             return 0
         while True:
@@ -248,6 +267,62 @@ def cmd_submit(args: argparse.Namespace) -> int:
                     print(f"  reason: {job['reason']}")
                 return 0 if job["state"] == "SUCCEEDED" else 1
             time.sleep(0.5)
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    body = {"handler": args.handler, "params": _job_params(args), "runs": args.runs,
+            "warmup": args.warmup}
+    with httpx.Client(base_url=args.controller, timeout=30) as http:
+        r = http.post("/api/v1/benchmarks", json=body)
+        if r.status_code >= 400:
+            print(r.json()["error"]["message"], file=sys.stderr)
+            return 1
+        b = r.json()
+        print(f"Benchmark {b['id']}: {b['warmup']} warm-up + {b['runs']} measured runs per mode")
+        shown = 0
+        try:
+            while b["state"] == "RUNNING":
+                time.sleep(1)
+                b = http.get(f"/api/v1/benchmarks/{b['id']}").json()
+                for res in b["results"][shown:]:
+                    tag = " (warm-up)" if res["warmup"] else ""
+                    who = ", ".join(f"{w['name']}:{w['tasks']}" for w in res["workers"])
+                    print(f"  {res['mode']:<12} {res['wall_s']:7.2f}s{tag:<11} [{who}]")
+                shown = len(b["results"])
+        except KeyboardInterrupt:
+            http.post(f"/api/v1/benchmarks/{b['id']}/cancel")
+            print("cancelled")
+            return 1
+    if b["state"] != "DONE":
+        print(f"Benchmark {b['state'].lower()}: {b['error'] or ''}", file=sys.stderr)
+        return 1
+    rep = b["report"]
+    print("\nProof-of-Speed")
+    for mode, m in rep["modes"].items():
+        pred = (f"   FitCheck predicted {m['predicted_s']:.1f}s "
+                f"({m['prediction_error']:+.0%})") if m.get("predicted_s") else ""
+        print(f"  {mode:<12} median {m['median_s']:7.2f}s  (min {m['min_s']:.2f}, "
+              f"max {m['max_s']:.2f}, n={m['runs']}){pred}")
+    if rep.get("speedup"):
+        print(f"  speedup      {rep['speedup']:.2f}x  ({rep['time_saved_s']:+.1f}s saved)")
+    same = "yes" if rep["identical_outputs"] else "NO - outputs differ!"
+    print(f"  identical output in every run: {same}")
+    if args.out:
+        Path(args.out).write_text(json.dumps(b, indent=2), encoding="utf-8")
+        print(f"  saved {args.out}")
+    return 0
+
+
+def cmd_sample_images(args: argparse.Namespace) -> int:
+    from daneion.workloads.images import make_samples
+
+    folder = Path(args.folder)
+    t0 = time.perf_counter()
+    paths = make_samples(folder, args.count)
+    size = sum(p.stat().st_size for p in paths)
+    print(f"{len(paths)} photos ({size / 1e6:.0f} MB) in {folder} "
+          f"({time.perf_counter() - t0:.1f}s)")
+    return 0
 
 
 def cmd_workers(args: argparse.Namespace) -> int:
@@ -334,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     w = sub.add_parser("worker", help="run this laptop's worker (after `daneion join`)")
     w.add_argument("--controller", default=None, help="override the saved controller URL")
     w.add_argument("--slots", type=int, default=None)
+    w.add_argument("--task-mem-mb", type=int, default=2048, help="memory cap per task")
     w.add_argument("--data-dir", default=str(default_data_dir()))
     w.set_defaults(fn=cmd_worker)
 
@@ -343,8 +419,25 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--mode", default="auto", choices=["auto", "local", "distributed"])
     s.add_argument("--preset", default="quick", help="named parameter set, e.g. quick or demo")
     s.add_argument("--params", default=None, help="JSON object of workload parameters")
+    s.add_argument("--source", default=None, help="image folder (for image_batch_v1)")
     s.add_argument("--wait", action="store_true")
     s.set_defaults(fn=cmd_submit)
+
+    b = sub.add_parser("bench", help="Proof-of-Speed: repeat a job local vs distributed")
+    b.add_argument("handler", nargs="?", default="fractal_tiles_v1")
+    b.add_argument("--controller", default=CONSOLE_URL)
+    b.add_argument("--preset", default="demo")
+    b.add_argument("--params", default=None)
+    b.add_argument("--source", default=None, help="image folder (for image_batch_v1)")
+    b.add_argument("--runs", type=int, default=5, help="measured runs per mode")
+    b.add_argument("--warmup", type=int, default=1, help="unmeasured runs per mode first")
+    b.add_argument("--out", default=None, help="save the full report as JSON")
+    b.set_defaults(fn=cmd_bench)
+
+    si = sub.add_parser("sample-images", help="create photo-like JPEGs for image_batch_v1")
+    si.add_argument("folder")
+    si.add_argument("--count", type=int, default=160)
+    si.set_defaults(fn=cmd_sample_images)
 
     ws = sub.add_parser("workers", help="list laptops in the cluster")
     ws.add_argument("--controller", default=CONSOLE_URL)
