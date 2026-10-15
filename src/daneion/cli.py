@@ -312,6 +312,25 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    with httpx.Client(base_url=args.controller, timeout=60) as http:
+        bench_id = args.bench
+        if not bench_id:
+            done = [b for b in http.get("/api/v1/benchmarks").json() if b["state"] == "DONE"]
+            if not done:
+                print("No finished benchmark yet. Run: daneion bench", file=sys.stderr)
+                return 1
+            bench_id = done[0]["id"]
+        r = http.get(f"/api/v1/benchmarks/{bench_id}/report.html")
+        if r.status_code >= 400:
+            print(r.text, file=sys.stderr)
+            return 1
+    out = Path(args.out or f"daneion-proof-of-speed-{bench_id[6:]}.html")
+    out.write_text(r.text, encoding="utf-8")
+    print(f"Saved {out.resolve()} ({len(r.content) / 1e6:.1f} MB), open it in any browser.")
+    return 0
+
+
 def cmd_sample_images(args: argparse.Namespace) -> int:
     from daneion.workloads.images import make_samples
 
@@ -432,6 +451,12 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--warmup", type=int, default=1, help="unmeasured runs per mode first")
     b.add_argument("--out", default=None, help="save the full report as JSON")
     b.set_defaults(fn=cmd_bench)
+
+    rp = sub.add_parser("report", help="save a benchmark as a self-contained HTML report")
+    rp.add_argument("bench", nargs="?", default=None, help="benchmark id (default: latest)")
+    rp.add_argument("--controller", default=CONSOLE_URL)
+    rp.add_argument("--out", default=None)
+    rp.set_defaults(fn=cmd_report)
 
     si = sub.add_parser("sample-images", help="create photo-like JPEGs for image_batch_v1")
     si.add_argument("folder")

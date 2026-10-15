@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -214,6 +220,13 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
     @api.get("/benchmarks/{bench_id}")
     def benchmark(bench_id: str) -> dict[str, Any]:
         return ctl.get_benchmark(bench_id)
+
+    @api.get("/benchmarks/{bench_id}/report.html")
+    def benchmark_report(bench_id: str, download: bool = False) -> HTMLResponse:
+        html = ctl.benchmark_report_html(bench_id)
+        headers = ({"Content-Disposition": f'attachment; filename="daneion-proof-of-speed-'
+                                           f'{bench_id[6:]}.html"'} if download else {})
+        return HTMLResponse(html, headers=headers)
 
     @api.post("/benchmarks/{bench_id}/cancel")
     def cancel_benchmark(bench_id: str) -> dict[str, Any]:

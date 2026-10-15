@@ -908,6 +908,19 @@ class Controller:
                     "finished_at": b.finished_at, "results": b.results, "report": b.report,
                     "error": b.error, "total_runs": len(self.bench_order(b.runs, b.warmup))}
 
+    def benchmark_report_html(self, bench_id: str) -> str:
+        from daneion.controller.report import render_report
+
+        b = self.get_benchmark(bench_id)
+        image = None
+        dist = [r for r in b["results"] if r["mode"] == "distributed"]
+        if dist:
+            try:
+                image = self.job_result(dist[-1]["job_id"])
+            except errors.NotFound:
+                image = None
+        return render_report(b, self.list_workers(), image)
+
     def list_benchmarks(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.db.read() as s:
             ids = s.scalars(select(Benchmark.id).order_by(Benchmark.created_at.desc())

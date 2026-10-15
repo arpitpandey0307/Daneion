@@ -95,3 +95,28 @@ def test_logs_never_contain_tokens() -> None:
     RedactSecrets().filter(record)
     msg = record.getMessage()
     assert "abcdefghijklmnop" not in msg and "s3cr3t" not in msg and "[redacted]" in msg
+
+
+def test_proof_of_speed_report_is_self_contained(tmp_path: Path) -> None:
+    from daneion.controller.report import render_report
+    from daneion.controller.service import benchmark_report
+
+    results = [
+        {"mode": "local", "warmup": False, "wall_s": 40.0, "result_sha256": "ab" * 32,
+         "predicted_s": 41.0, "workers": [{"name": "me", "tasks": 160}], "job_id": "j1"},
+        {"mode": "distributed", "warmup": False, "wall_s": 20.0, "result_sha256": "ab" * 32,
+         "predicted_s": 21.0, "workers": [{"name": "me", "tasks": 80},
+                                          {"name": "<b>victus</b>", "tasks": 80}],
+         "job_id": "j2"},
+    ]
+    bench = {"id": "bench_x", "runs": 1, "warmup": 0, "created_at": 1_700_000_000.0,
+             "results": results, "report": benchmark_report(results)}
+    img = tmp_path / "r.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    workers = [{"name": "me", "state": "ONLINE", "is_local": True, "slots": 8,
+                "capabilities": {"cpu": "Ryzen 9", "cores_physical": 16, "ram_gb": 15}}]
+    html = render_report(bench, workers, img)
+    assert "2.00<span>×</span>" in html and "Recorded result" in html
+    assert "data:image/png;base64," in html
+    assert "<b>victus</b>" not in html and "&lt;b&gt;victus&lt;/b&gt;" in html  # escaped
+    assert "http://" not in html and "https://" not in html  # nothing loaded from the network

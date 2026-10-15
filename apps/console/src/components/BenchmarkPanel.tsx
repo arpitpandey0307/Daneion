@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Gauge, Loader2, Play, Square, Trophy, XCircle } from "lucide-react";
+import { CheckCircle2, Download, FileText, Gauge, Loader2, Play, Square, Trophy, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type Benchmark, type BenchModeStats } from "../api";
 import { fmtPct, fmtSeconds, handlerLabel, timeAgo } from "../format";
@@ -181,6 +181,18 @@ export function BenchmarkPanel() {
                       sha256 {rep.result_sha256.slice(0, 16)}…
                     </div>
                   )}
+                  <div className="mt-4 flex gap-2">
+                    <a href={`/api/v1/benchmarks/${current.id}/report.html`} target="_blank" rel="noreferrer"
+                       className="inline-flex items-center gap-1.5 rounded-lg bg-ink-700/70 px-2.5 py-1.5 text-xs font-medium text-ink-100 ring-1 ring-inset ring-ink-600 hover:bg-ink-600"
+                       title="Self-contained page for slides or a backup if the live demo fails">
+                      <FileText className="h-3.5 w-3.5" /> Report
+                    </a>
+                    <a href={`/api/v1/benchmarks/${current.id}/report.html?download=true`}
+                       className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-ink-300 ring-1 ring-inset ring-ink-600 hover:bg-ink-700"
+                       title="Save the report as one HTML file">
+                      <Download className="h-3.5 w-3.5" /> Save
+                    </a>
+                  </div>
                 </div>
                 <RangeChart modes={rep.modes} />
               </div>
