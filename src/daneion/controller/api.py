@@ -48,6 +48,14 @@ class FailIn(BaseModel):
     message: str = Field(default="", max_length=4000)
 
 
+class PairIn(BaseModel):
+    code: str = Field(min_length=4, max_length=32)
+    name: str = Field(default="", max_length=64)
+    os: str = Field(default="", max_length=64)
+    slots: int = Field(default=1, ge=1, le=256)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
 class AttemptRef(BaseModel):
     attempt_id: str
     fence: int
@@ -68,9 +76,26 @@ def current_worker(request: Request,
 WorkerDep = Annotated[Worker, Depends(current_worker)]
 
 
-def create_app(ctl: Controller, console_dir: Path | None = None) -> FastAPI:
-    app = FastAPI(title="Daneion controller", version=__version__, docs_url="/api/docs",
-                  openapi_url="/api/openapi.json")
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+
+def _host_only(value: str) -> str:
+    value = value.split("://", 1)[-1].split("/", 1)[0]
+    if value.startswith("["):
+        return value.split("]", 1)[0] + "]"
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = "console",
+               lan_info: dict[str, Any] | None = None) -> FastAPI:
+    """role="console": loopback listener with everything (dashboard, CLI, local worker).
+    role="lan": the network-facing TLS listener, which only serves pairing and worker routes."""
+    if role not in ("console", "lan"):
+        raise ValueError(role)
+    console = role == "console"
+    app = FastAPI(title=f"Daneion controller ({role})", version=__version__,
+                  docs_url="/api/docs" if console else None,
+                  openapi_url="/api/openapi.json" if console else None, redoc_url=None)
     app.state.ctl = ctl
 
     @app.exception_handler(errors.DaneionError)
@@ -78,12 +103,39 @@ def create_app(ctl: Controller, console_dir: Path | None = None) -> FastAPI:
         return JSONResponse(status_code=exc.status,
                             content={"error": {"code": exc.code, "message": exc.message}})
 
+    if console:
+        @app.middleware("http")
+        async def _loopback_only(request: Request, call_next):  # type: ignore[no-untyped-def]
+            # DNS-rebinding and cross-site protection: the console answers only to localhost
+            # names, and browser requests must come from a localhost origin.
+            host = _host_only(request.headers.get("host", ""))
+            origin = request.headers.get("origin")
+            if host not in LOCAL_HOSTS or (origin and _host_only(origin) not in LOCAL_HOSTS):
+                return JSONResponse(status_code=403, content={"error": {
+                    "code": "FORBIDDEN_ORIGIN", "message": "console is localhost-only"}})
+            return await call_next(request)
+
+    @app.get("/api/v1/health")
+    def health() -> dict[str, Any]:
+        return {"ok": True, "version": __version__, "role": role}
+
     # ---------------------------------------------------------------- console
     api = APIRouter(prefix="/api/v1")
 
-    @api.get("/health")
-    def health() -> dict[str, Any]:
-        return {"ok": True, "version": __version__}
+    @api.post("/pairing")
+    def open_pairing() -> dict[str, Any]:
+        info = lan_info or {}
+        out = ctl.open_pairing()
+        out.update({"fingerprint": info.get("fingerprint", ""), "lan_port": info.get("port"),
+                    "addresses": info.get("addresses", [])})
+        host = out["addresses"][0] if out["addresses"] else "<controller-ip>"
+        port = "" if info.get("port") in (None, 8751) else f" --port {info.get('port')}"
+        out["command"] = f"daneion join {host} {out['code']} --fp {out['fingerprint']}{port}"
+        return out
+
+    @api.get("/pairing")
+    def pairing_status() -> dict[str, Any]:
+        return {**ctl.pairing_status(), "lan_enabled": bool(lan_info)}
 
     @api.get("/cluster")
     def cluster() -> dict[str, Any]:
@@ -209,10 +261,19 @@ def create_app(ctl: Controller, console_dir: Path | None = None) -> FastAPI:
         ctl.fail(worker, attempt_id, body.fence, body.error_class, body.message)
         return {"ok": True}
 
-    app.include_router(api)
+    @wk.post("/pair")
+    def pair(body: PairIn, request: Request) -> dict[str, Any]:
+        ip = request.client.host if request.client else "unknown"
+        worker_id, token = ctl.pair(body.code, body.name or ip, client_ip=ip, os_name=body.os,
+                                    capabilities=body.capabilities, slots=body.slots)
+        return {"worker_id": worker_id, "token": token,
+                "heartbeat_interval_s": ctl.cfg.heartbeat_interval_s}
+
+    if console:
+        app.include_router(api)
     app.include_router(wk)
 
-    if console_dir and (console_dir / "index.html").exists():
+    if console and console_dir and (console_dir / "index.html").exists():
         app.mount("/", StaticFiles(directory=console_dir, html=True), name="console")
 
     return app

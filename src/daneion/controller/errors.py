@@ -40,3 +40,11 @@ class ClusterFull(DaneionError):
 
 class Conflict(DaneionError):
     status, code = 409, "CONFLICT"
+
+
+class PairingFailed(DaneionError):
+    status, code = 401, "PAIRING_FAILED"
+
+
+class RateLimited(DaneionError):
+    status, code = 429, "RATE_LIMITED"

@@ -90,6 +90,12 @@ class WorkerAgent:
                 leases = self._post("/api/v1/worker/poll", {"free_slots": free})["leases"]
                 backoff = 1.0
             except (httpx.HTTPError, StaleLease) as exc:
+                if (isinstance(exc, httpx.HTTPStatusError)
+                        and exc.response.status_code == 401):
+                    log.error("controller rejected this laptop's token (revoked or replaced); "
+                              "pair again with `daneion join`")
+                    self.stop()
+                    break
                 log.warning("poll failed: %s; retrying in %.0fs", exc, backoff)
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, 15.0)

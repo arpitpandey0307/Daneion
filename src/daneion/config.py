@@ -13,8 +13,13 @@ def default_data_dir() -> Path:
 @dataclass
 class ControllerConfig:
     data_dir: Path = field(default_factory=default_data_dir)
-    host: str = "127.0.0.1"
+    host: str = "127.0.0.1"  # console listener: loopback only (ADR-0015)
     port: int = 8750
+    lan_host: str | None = "0.0.0.0"  # worker listener (TLS); None disables it
+    lan_port: int = 8751
+    pairing_ttl_s: float = 120.0
+    pairing_max_failures: int = 10  # per code, then the code is burned
+    pair_ip_failures_per_min: int = 5
     max_nodes: int = 5  # ADR-0019: includes the controller's own local worker
     heartbeat_interval_s: float = 3.0
     suspect_after_missed: int = 3
@@ -31,6 +36,10 @@ class ControllerConfig:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "controller.db"
+
+    @property
+    def tls_dir(self) -> Path:
+        return self.data_dir / "tls"
 
     @property
     def artifacts_dir(self) -> Path:

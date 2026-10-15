@@ -1,4 +1,4 @@
-"""`daneion` command line: run a controller, run a worker, submit jobs."""
+"""`daneion` command line: run a controller, pair and run workers, submit jobs."""
 
 from __future__ import annotations
 
@@ -10,11 +10,14 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from daneion import __version__
 from daneion.config import ControllerConfig, default_data_dir
+
+CONSOLE_URL = "http://127.0.0.1:8750"
 
 
 def _local_worker_token(ctl: object, cfg: ControllerConfig, slots: int) -> str:
@@ -38,21 +41,44 @@ def _local_worker_token(ctl: object, cfg: ControllerConfig, slots: int) -> str:
     return token
 
 
+def _serve_in_thread(server: Any, name: str) -> threading.Thread:
+    t = threading.Thread(target=server.run, name=name, daemon=True)
+    t.start()
+    return t
+
+
 def cmd_controller(args: argparse.Namespace) -> int:
     import uvicorn
 
     from daneion.controller.api import create_app
     from daneion.controller.service import Controller
+    from daneion.net import lan_addresses
+    from daneion.tls import FINGERPRINT_CHARS, ensure_controller_cert
     from daneion.worker.agent import WorkerAgent
     from daneion.worker.probe import default_slots
 
-    cfg = ControllerConfig(data_dir=Path(args.data_dir), host=args.host, port=args.port,
-                           local_worker=not args.no_local_worker)
+    cfg = ControllerConfig(data_dir=Path(args.data_dir), port=args.port,
+                           lan_host=None if args.no_lan else args.lan_host,
+                           lan_port=args.lan_port, local_worker=not args.no_local_worker)
     ctl = Controller(cfg)
     ctl.start_background()
+
+    lan_info: dict[str, Any] | None = None
+    lan_server = None
+    if cfg.lan_host:
+        cert, key, fp = ensure_controller_cert(cfg.tls_dir)
+        addresses = lan_addresses() if cfg.lan_host == "0.0.0.0" else [cfg.lan_host]
+        lan_info = {"fingerprint": fp[:FINGERPRINT_CHARS], "port": cfg.lan_port,
+                    "addresses": addresses}
+        lan_server = uvicorn.Server(uvicorn.Config(
+            create_app(ctl, role="lan"), host=cfg.lan_host, port=cfg.lan_port,
+            ssl_certfile=str(cert), ssl_keyfile=str(key), log_level="warning",
+            timeout_keep_alive=60))
+        _serve_in_thread(lan_server, "lan-listener")
+
     console = Path(args.console_dir) if args.console_dir else _find_console()
-    app = create_app(ctl, console)
-    server = uvicorn.Server(uvicorn.Config(app, host=cfg.host, port=cfg.port, log_level="warning",
+    server = uvicorn.Server(uvicorn.Config(create_app(ctl, console, lan_info=lan_info),
+                                           host="127.0.0.1", port=cfg.port, log_level="warning",
                                            timeout_keep_alive=60))
     agent = None
     if cfg.local_worker:
@@ -61,15 +87,21 @@ def cmd_controller(args: argparse.Namespace) -> int:
         agent = WorkerAgent(f"http://127.0.0.1:{cfg.port}", token, slots=slots,
                             work_dir=cfg.data_dir / "local-worker")
         threading.Thread(target=agent.run, name="local-worker", daemon=True).start()
-    print(f"Daneion controller {__version__} on http://{cfg.host}:{cfg.port}"
-          f"  (data: {cfg.data_dir})")
-    if console:
-        print(f"Console: http://127.0.0.1:{cfg.port}/")
+
+    print(f"Daneion controller {__version__}  (data: {cfg.data_dir})")
+    print(f"  Console (this laptop only): http://127.0.0.1:{cfg.port}/")
+    if lan_info:
+        ips = ", ".join(lan_info["addresses"]) or "no LAN address found - check Wi-Fi"
+        print(f"  Workers join over TLS on:   {ips} port {cfg.lan_port}")
+        print(f"  Certificate fingerprint:    {lan_info['fingerprint']}")
+        print("  To add a laptop:            daneion pair")
     try:
         server.run()
     finally:
         if agent:
             agent.stop()
+        if lan_server:
+            lan_server.should_exit = True
         ctl.stop_background()
     return 0
 
@@ -83,10 +115,85 @@ def _find_console() -> Path | None:
     return None
 
 
+def cmd_pair(args: argparse.Namespace) -> int:
+    with httpx.Client(base_url=args.controller, timeout=10) as http:
+        r = http.post("/api/v1/pairing")
+    if r.status_code >= 400:
+        print(r.text, file=sys.stderr)
+        return 1
+    info = r.json()
+    print(f"Pairing code {info['code']}  (valid {info['ttl_s']:.0f}s, single use)")
+    print("On the other laptop, in the Daneion folder, run:\n")
+    print(f"  uv run {info['command']}\n")
+    if len(info["addresses"]) > 1:
+        print(f"If that address does not work, try: {', '.join(info['addresses'][1:])}")
+    return 0
+
+
+# ---------------------------------------------------------------------- worker side
+def _creds_dir(args: argparse.Namespace) -> Path:
+    return Path(args.data_dir) / "worker"
+
+
+def cmd_join(args: argparse.Namespace) -> int:
+    from daneion.tls import fetch_server_cert, fingerprint, pinned_context
+    from daneion.worker.probe import default_slots, os_name, probe
+
+    try:
+        pem = fetch_server_cert(args.host, args.port)
+    except OSError as exc:
+        print(f"Cannot reach {args.host}:{args.port}: {exc}\n"
+              "Check: same Wi-Fi/hotspot, controller running, Windows firewall allows port "
+              f"{args.port} (network profile = Private).", file=sys.stderr)
+        return 2
+    fp = fingerprint(pem)
+    expected = args.fp.lower().replace(":", "")
+    if len(expected) < 8 or not fp.startswith(expected):
+        print(f"Certificate fingerprint mismatch: controller shows {expected}, got {fp[:16]}.\n"
+              "Refusing to join (wrong address or someone in the middle).", file=sys.stderr)
+        return 3
+    d = _creds_dir(args)
+    d.mkdir(parents=True, exist_ok=True)
+    cert_path = d / "controller.crt"
+    cert_path.write_text(pem, encoding="ascii")
+    url = f"https://{args.host}:{args.port}"
+    slots = args.slots or default_slots()
+    name = args.name or socket.gethostname()
+    with httpx.Client(base_url=url, verify=pinned_context(cert_path), timeout=15) as http:
+        r = http.post("/api/v1/worker/pair", json={
+            "code": args.code, "name": name, "os": os_name(), "slots": slots,
+            "capabilities": probe()})
+    if r.status_code >= 400:
+        print(f"Pairing refused: {r.json().get('error', {}).get('message', r.text)}",
+              file=sys.stderr)
+        return 4
+    body = r.json()
+    (d / "credentials.json").write_text(json.dumps({
+        "url": url, "token": body["token"], "worker_id": body["worker_id"], "name": name,
+        "fingerprint": fp, "slots": slots}, indent=2), encoding="utf-8")
+    print(f"Joined as {name} ({slots} slots). Credentials saved in {d}.")
+    if args.no_run:
+        return 0
+    args.controller = None
+    return cmd_worker(args)
+
+
 def cmd_worker(args: argparse.Namespace) -> int:
+    from daneion.tls import pinned_context
     from daneion.worker.agent import WorkerAgent
 
-    agent = WorkerAgent(args.controller, args.token, name=args.name, slots=args.slots)
+    d = _creds_dir(args)
+    creds_path = d / "credentials.json"
+    if not creds_path.exists():
+        print("This laptop is not paired yet. Run `daneion pair` on the controller, then "
+              "`daneion join <ip> <code> --fp <fingerprint>` here.", file=sys.stderr)
+        return 2
+    creds = json.loads(creds_path.read_text(encoding="utf-8"))
+    url = getattr(args, "controller", None) or creds["url"]
+    agent = WorkerAgent(url, creds["token"], name=creds["name"],
+                        slots=args.slots or creds.get("slots"),
+                        work_dir=d, verify=pinned_context(d / "controller.crt"))
+    print(f"Worker {creds['name']} -> {url}  (Ctrl+C to leave)")
     try:
         agent.run()
     except KeyboardInterrupt:
@@ -126,6 +233,18 @@ def cmd_submit(args: argparse.Namespace) -> int:
             time.sleep(0.5)
 
 
+def cmd_workers(args: argparse.Namespace) -> int:
+    with httpx.Client(base_url=args.controller, timeout=10) as http:
+        workers = http.get("/api/v1/workers").json()
+    for w in workers:
+        caps = w["capabilities"]
+        gpu = ", ".join(g["name"] for g in caps.get("gpus", [])) or "-"
+        print(f"{w['state']:<8} {w['name']:<30} {w['slots']:>3} slots  "
+              f"{caps.get('cpu', '?')[:34]:<34} {caps.get('ram_gb', '?')} GB  {gpu}  "
+              f"seen {w['last_seen_s']}s ago")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="daneion", description="LAN compute sharing")
     p.add_argument("--version", action="version", version=__version__)
@@ -133,29 +252,49 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("controller", help="run the controller (and its local worker)")
-    c.add_argument("--host", default="127.0.0.1")
-    c.add_argument("--port", type=int, default=8750)
+    c.add_argument("--port", type=int, default=8750, help="console port (localhost only)")
+    c.add_argument("--lan-host", default="0.0.0.0", help="interface for workers to connect to")
+    c.add_argument("--lan-port", type=int, default=8751)
+    c.add_argument("--no-lan", action="store_true", help="single-laptop mode, no worker listener")
     c.add_argument("--data-dir", default=str(default_data_dir()))
     c.add_argument("--slots", type=int, default=None, help="local worker slots")
     c.add_argument("--no-local-worker", action="store_true")
     c.add_argument("--console-dir", default=None)
     c.set_defaults(fn=cmd_controller)
 
-    w = sub.add_parser("worker", help="run a worker that joins a controller")
-    w.add_argument("--controller", required=True, help="e.g. http://192.168.1.10:8750")
-    w.add_argument("--token", required=True)
-    w.add_argument("--name", default=None)
+    pa = sub.add_parser("pair", help="issue a one-time code for a new laptop (on the controller)")
+    pa.add_argument("--controller", default=CONSOLE_URL)
+    pa.set_defaults(fn=cmd_pair)
+
+    j = sub.add_parser("join", help="pair this laptop with a controller, then start working")
+    j.add_argument("host", help="controller LAN address shown by `daneion pair`")
+    j.add_argument("code", help="pairing code, e.g. K7QM-2XPA")
+    j.add_argument("--fp", required=True, help="certificate fingerprint shown by `daneion pair`")
+    j.add_argument("--port", type=int, default=8751)
+    j.add_argument("--name", default=None)
+    j.add_argument("--slots", type=int, default=None)
+    j.add_argument("--data-dir", default=str(default_data_dir()))
+    j.add_argument("--no-run", action="store_true", help="only pair, do not start the worker")
+    j.set_defaults(fn=cmd_join)
+
+    w = sub.add_parser("worker", help="run this laptop's worker (after `daneion join`)")
+    w.add_argument("--controller", default=None, help="override the saved controller URL")
     w.add_argument("--slots", type=int, default=None)
+    w.add_argument("--data-dir", default=str(default_data_dir()))
     w.set_defaults(fn=cmd_worker)
 
     s = sub.add_parser("submit", help="submit a job")
     s.add_argument("handler", nargs="?", default="fractal_tiles_v1")
-    s.add_argument("--controller", default="http://127.0.0.1:8750")
+    s.add_argument("--controller", default=CONSOLE_URL)
     s.add_argument("--mode", default="auto", choices=["auto", "local", "distributed"])
     s.add_argument("--preset", default="quick", help="named parameter set, e.g. quick or demo")
     s.add_argument("--params", default=None, help="JSON object of workload parameters")
     s.add_argument("--wait", action="store_true")
     s.set_defaults(fn=cmd_submit)
+
+    ws = sub.add_parser("workers", help="list laptops in the cluster")
+    ws.add_argument("--controller", default=CONSOLE_URL)
+    ws.set_defaults(fn=cmd_workers)
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

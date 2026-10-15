@@ -7,6 +7,7 @@ Every state change happens inside `db.tx()` (one writer), goes through the trans
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import random
@@ -40,6 +41,9 @@ from daneion.workloads import WorkloadError, get_workload
 log = logging.getLogger("daneion.controller")
 
 # Failure classes a worker may report. Anything else is treated as non-retryable.
+# Pairing codes avoid look-alike characters (0/O, 1/I/L) so they can be read across a room.
+CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
 RETRYABLE = {"timeout", "killed", "worker_lost", "transfer", "resource", "lease_expired"}
 MODES = {"local", "distributed", "auto"}
 
@@ -69,6 +73,9 @@ class Controller:
         self._finalizing: set[str] = set()
         self._stop = threading.Event()
         self._sweeper: threading.Thread | None = None
+        self._pair_lock = threading.Lock()
+        self._pairing: dict[str, Any] | None = None  # {hash, expires_at, failures}
+        self._pair_failures: dict[str, list[float]] = {}
 
     # ------------------------------------------------------------------ lifecycle
     def start_background(self) -> None:
@@ -147,6 +154,67 @@ class Controller:
                         local=is_local, slots=worker.slots)
         self._notify_events()
         return worker.id, token
+
+    # ------------------------------------------------------------------ pairing
+    def open_pairing(self) -> dict[str, Any]:
+        """Issue a fresh one-time code (replaces any open one). Only the hash is kept."""
+        raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
+        expires = self.clock() + self.cfg.pairing_ttl_s
+        with self._pair_lock:
+            self._pairing = {"hash": hash_token(raw), "expires_at": expires, "failures": 0}
+        with self.db.tx() as s:
+            self._event(s, "pairing.opened", "Pairing code issued",
+                        ttl_s=self.cfg.pairing_ttl_s)
+        self._notify_events()
+        return {"code": f"{raw[:4]}-{raw[4:]}", "expires_at": expires,
+                "ttl_s": self.cfg.pairing_ttl_s}
+
+    def pairing_status(self) -> dict[str, Any]:
+        with self._pair_lock:
+            p = self._pairing
+            if p is None or p["expires_at"] <= self.clock():
+                return {"open": False}
+            return {"open": True, "expires_at": p["expires_at"]}
+
+    def pair(self, code: str, name: str, *, client_ip: str, os_name: str = "",
+             capabilities: dict[str, Any] | None = None, slots: int = 1) -> tuple[str, str]:
+        """Redeem a pairing code for a worker identity. Single use, expiring, rate-limited."""
+        now = self.clock()
+        normalised = "".join(ch for ch in code.upper() if ch.isalnum())
+        with self._pair_lock:
+            recent = [t for t in self._pair_failures.get(client_ip, []) if now - t < 60]
+            self._pair_failures[client_ip] = recent
+            if len(recent) >= self.cfg.pair_ip_failures_per_min:
+                raise errors.RateLimited("too many wrong pairing codes; wait a minute")
+            p = self._pairing
+            valid = (p is not None and p["expires_at"] > now
+                     and hmac.compare_digest(p["hash"], hash_token(normalised)))
+            if not valid:
+                recent.append(now)
+                if p is not None:
+                    p["failures"] += 1
+                    if p["failures"] >= self.cfg.pairing_max_failures:
+                        self._pairing = None
+                reason = ("pairing code expired or not issued" if p is None
+                          or p["expires_at"] <= now else "wrong pairing code")
+                with self.db.tx() as s:
+                    self._event(s, "pairing.failed", f"Pairing failed from {client_ip}: {reason}")
+                self._notify_events()
+                raise errors.PairingFailed(reason)
+            self._pairing = None  # single use
+        name = (name.strip() or client_ip)[:64]
+        with self.db.tx() as s:
+            # Re-pairing the same laptop replaces its old identity instead of using a new slot.
+            for old in s.scalars(select(Worker).where(
+                    Worker.name == name, Worker.is_local.is_(False),
+                    Worker.state != WorkerState.REVOKED)).all():
+                old.state = WorkerState.REVOKED
+                old.version += 1
+                self._release_worker_attempts(s, old, "replaced by re-pairing")
+                self._event(s, "worker.revoked", f"{old.name} replaced by a new pairing",
+                            worker_id=old.id)
+        return self.register_worker(name, os_name=os_name, capabilities=capabilities,
+                                    slots=slots)
 
     def authenticate(self, token: str | None) -> Worker:
         if not token:
