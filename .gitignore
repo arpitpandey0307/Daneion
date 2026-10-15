@@ -17,6 +17,7 @@ venv/
 htmlcov/
 dist/
 build/
+release/
 *.egg-info/
 
 # --- JS / TS ---
