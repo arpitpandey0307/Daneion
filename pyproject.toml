@@ -1,0 +1,37 @@
+[project]
+name = "daneion"
+version = "0.1.0"
+description = "LAN compute sharing for trusted laptops: controller, worker and built-in workloads"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.8",
+    "httpx>=0.27",
+    "psutil>=6.0",
+    "pillow>=10.4",
+]
+
+[project.scripts]
+daneion = "daneion.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/daneion"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
