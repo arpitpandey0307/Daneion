@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>Daneion – share compute between laptops</title>
+  <meta name="description" content="Daneion lets up to five trusted laptops on the same network share CPU work, and tells you honestly when it is faster to stay on one laptop." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1020'/%3E%3Cpath d='M9 8h7a8 8 0 010 16H9z' fill='none' stroke='%2322d3ee' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%23fbbf24'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --ink-950: #070a12; --ink-900: #0b1020; --ink-850: #0f1528; --ink-800: #141b31;
+      --ink-700: #1d2642; --ink-600: #2a3558; --ink-400: #6b77a3; --ink-300: #98a3c7;
+      --ink-200: #c3cbe6; --ink-100: #e6eaf7;
+      --brand: #22d3ee; --brand-soft: #0e7490; --amber: #fbbf24; --good: #34d399; --bad: #fb7185;
+      --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Inter, Roboto, Arial, sans-serif;
+      --mono: "Cascadia Mono", "Cascadia Code", ui-monospace, "SF Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0; color: var(--ink-100); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(34, 211, 238, 0.08), transparent 60%),
+        radial-gradient(900px 500px at 100% 0%, rgba(251, 191, 36, 0.05), transparent 60%),
+        var(--ink-950);
+    }
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    ::selection { background: rgba(34, 211, 238, 0.3); }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+    code, .mono { font-family: var(--mono); }
+
+    header { position: sticky; top: 0; z-index: 10; border-bottom: 1px solid rgba(29, 38, 66, 0.6);
+      background: rgba(7, 10, 18, 0.75); backdrop-filter: blur(14px); }
+    header .wrap { display: flex; align-items: center; gap: 12px; height: 60px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; color: var(--ink-100); letter-spacing: 0.01em; }
+    .brand:hover { text-decoration: none; }
+    nav { margin-left: auto; display: flex; gap: 22px; font-size: 14px; }
+    nav a { color: var(--ink-300); }
+    nav a:hover { color: var(--ink-100); text-decoration: none; }
+
+    .hero { padding: 88px 0 64px; display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 48px; align-items: center; }
+    .pill { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-300);
+      border: 1px solid var(--ink-700); background: var(--ink-900); border-radius: 999px; padding: 4px 12px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+    h1 { font-size: clamp(36px, 5.4vw, 58px); line-height: 1.06; letter-spacing: -0.025em; margin: 18px 0 18px; font-weight: 700; }
+    h1 em { font-style: normal; background: linear-gradient(90deg, var(--brand), #7dd3fc 60%, var(--amber));
+      -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lead { font-size: 19px; color: var(--ink-300); max-width: 34em; margin: 0 0 30px; }
+    .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .btn { display: inline-flex; align-items: center; gap: 10px; border-radius: 12px; padding: 13px 20px;
+      font-weight: 600; font-size: 16px; border: 1px solid transparent; cursor: pointer; font-family: inherit; }
+    .btn:hover { text-decoration: none; }
+    .btn-primary { background: var(--brand); color: #04222a; box-shadow: 0 8px 30px -8px rgba(34, 211, 238, 0.55); }
+    .btn-primary:hover { background: #67e8f9; }
+    .btn-ghost { color: var(--ink-100); border-color: var(--ink-600); background: rgba(20, 27, 49, 0.6); }
+    .btn-ghost:hover { border-color: var(--ink-400); }
+    .meta { margin-top: 16px; font-size: 13px; color: var(--ink-400); }
+
+    .hash { margin-top: 18px; display: flex; align-items: center; gap: 8px; max-width: 100%;
+      border: 1px solid var(--ink-700); background: var(--ink-900); border-radius: 10px; padding: 8px 8px 8px 12px; }
+    .hash span { font-size: 12px; color: var(--ink-400); white-space: nowrap; }
+    .hash code { font-size: 12px; color: var(--ink-200); overflow-x: auto; white-space: nowrap; flex: 1; scrollbar-width: none; }
+    .copy { font: 600 12px var(--sans); color: var(--ink-200); background: var(--ink-800); border: 1px solid var(--ink-600);
+      border-radius: 7px; padding: 5px 10px; cursor: pointer; white-space: nowrap; }
+    .copy:hover { border-color: var(--brand); color: var(--brand); }
+
+    .diagram { border: 1px solid var(--ink-700); background: linear-gradient(180deg, var(--ink-850), var(--ink-900));
+      border-radius: 20px; padding: 18px; box-shadow: 0 30px 80px -40px rgba(34, 211, 238, 0.35); }
+    .diagram svg { width: 100%; height: auto; display: block; }
+    .diagram p { margin: 10px 4px 2px; font-size: 13px; color: var(--ink-400); text-align: center; }
+
+    section { padding: 64px 0; border-top: 1px solid rgba(29, 38, 66, 0.55); }
+    .eyebrow { color: var(--brand); font-size: 13px; font-weight: 650; letter-spacing: 0.12em; text-transform: uppercase; }
+    h2 { font-size: clamp(26px, 3.4vw, 36px); letter-spacing: -0.02em; line-height: 1.15; margin: 8px 0 12px; }
+    .sub { color: var(--ink-300); max-width: 42em; margin: 0 0 32px; }
+
+    .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .card { border: 1px solid var(--ink-700); background: rgba(15, 21, 40, 0.75); border-radius: 16px; padding: 22px; }
+    .card h3 { margin: 0 0 6px; font-size: 17px; }
+    .card p { margin: 0; color: var(--ink-300); font-size: 15px; }
+    .step { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; margin-bottom: 14px;
+      background: rgba(34, 211, 238, 0.12); color: var(--brand); font-weight: 700; font-size: 14px; border: 1px solid rgba(34, 211, 238, 0.3); }
+    .file { font-family: var(--mono); font-size: 13px; color: var(--amber); }
+
+    .proof { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    .bars { margin-top: 18px; display: grid; gap: 10px; }
+    .bar { display: grid; grid-template-columns: 92px 1fr 64px; gap: 10px; align-items: center; font-size: 14px; color: var(--ink-300); }
+    .track { height: 12px; border-radius: 6px; background: var(--ink-800); overflow: hidden; }
+    .fill { height: 100%; border-radius: 6px; }
+    .num { font-family: var(--mono); color: var(--ink-100); text-align: right; font-size: 13px; }
+    .big { font-size: 40px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+    .tag { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 3px 10px; margin-bottom: 12px; }
+    .tag-go { color: var(--good); background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.3); }
+    .tag-stay { color: var(--amber); background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3); }
+    .note { margin-top: 16px; font-size: 13px; color: var(--ink-400); }
+
+    ul.list { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+    ul.list li { display: flex; gap: 10px; color: var(--ink-200); font-size: 15px; }
+    ul.list li::before { content: ""; flex: none; width: 18px; height: 18px; margin-top: 3px; border-radius: 50%; }
+    ul.yes li::before { background: rgba(52, 211, 153, 0.15) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M5 10.5l3 3 7-7' fill='none' stroke='%2334d399' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/14px no-repeat; }
+    ul.no li::before { background: rgba(251, 113, 133, 0.13) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M6 6l8 8M14 6l-8 8' fill='none' stroke='%23fb7185' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") center/14px no-repeat; }
+
+    details { border: 1px solid var(--ink-700); background: rgba(15, 21, 40, 0.75); border-radius: 12px; padding: 14px 18px; }
+    details + details { margin-top: 10px; }
+    summary { cursor: pointer; font-weight: 600; }
+    details p, details ol { color: var(--ink-300); font-size: 15px; margin: 10px 0 0; }
+    pre { background: var(--ink-900); border: 1px solid var(--ink-700); border-radius: 8px; padding: 10px 12px;
+      overflow-x: auto; font: 13px/1.5 var(--mono); color: var(--ink-200); margin: 10px 0 0; }
+
+    .final { text-align: center; padding: 80px 0; }
+    .final .cta { justify-content: center; }
+    footer { border-top: 1px solid rgba(29, 38, 66, 0.55); padding: 28px 0 40px; color: var(--ink-400); font-size: 14px; }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; }
+
+    @media (max-width: 860px) {
+      .hero { grid-template-columns: 1fr; padding-top: 56px; }
+      .grid3, .grid2, .proof { grid-template-columns: 1fr; }
+      nav { display: none; }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .pulse { animation: pulse 2.4s ease-in-out infinite; }
+      .flow { stroke-dasharray: 4 7; animation: flow 1.4s linear infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+      @keyframes flow { to { stroke-dashoffset: -22; } }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="#">
+        <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+          <defs><linearGradient id="lg" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#0e7490"/></linearGradient></defs>
+          <rect width="32" height="32" rx="9" fill="#0f1528" stroke="#1d2642"/>
+          <path d="M10 8.5h6a7.5 7.5 0 010 15h-6z" fill="none" stroke="url(#lg)" stroke-width="2.6" stroke-linejoin="round"/>
+          <circle cx="16" cy="16" r="2.4" fill="#fbbf24"/><circle cx="10" cy="8.5" r="1.6" fill="#22d3ee"/><circle cx="10" cy="23.5" r="1.6" fill="#22d3ee"/>
+        </svg>
+        Daneion
+      </a>
+      <nav>
+        <a href="#how">How it works</a>
+        <a href="#fitcheck">FitCheck</a>
+        <a href="#scope">What it is</a>
+        <a href="#help">Help</a>
+        <a href="https://github.com/arpitpandey0307/Daneion">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap hero">
+      <div>
+        <span class="pill"><span class="dot"></span>Windows preview · v0.1.0</span>
+        <h1>Turn the laptops in the room into <em>one fast computer</em>.</h1>
+        <p class="lead">Daneion splits heavy jobs across up to five trusted laptops on the same Wi-Fi, checks every result, and tells you honestly when one laptop alone would be faster.</p>
+        <div class="cta">
+          <a class="btn btn-primary" id="download" href="https://github.com/arpitpandey0307/Daneion/releases/download/v0.1.0/Daneion-0.1.0-windows.zip">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>
+            Download for Windows
+          </a>
+          <a class="btn btn-ghost" href="#how">How it works</a>
+        </div>
+        <p class="meta">Windows 10/11, 64-bit · 0.2 MB zip · free and open source</p>
+        <div class="hash">
+          <span>SHA-256</span>
+          <code id="sha">17d6968f5d4e3744ddf82a02cb6daa95254f7987f9d3ea446d25d77530a66485</code>
+          <button class="copy" data-copy="sha" type="button">Copy</button>
+        </div>
+      </div>
+
+      <div class="diagram" aria-label="One controller laptop sends tiles of work to three worker laptops">
+        <svg viewBox="0 0 360 280" role="img">
+          <title>Controller laptop sharing work with three worker laptops</title>
+          <g fill="none" stroke-width="2">
+            <path class="flow" d="M180 140 L64 52" stroke="#22d3ee"/>
+            <path class="flow" d="M180 140 L296 52" stroke="#22d3ee"/>
+            <path class="flow" d="M180 140 L180 236" stroke="#22d3ee"/>
+          </g>
+          <g font-family="Segoe UI, system-ui, sans-serif" font-size="12" text-anchor="middle">
+            <g transform="translate(180 140)">
+              <rect x="-62" y="-34" width="124" height="68" rx="14" fill="#141b31" stroke="#22d3ee" stroke-width="1.5"/>
+              <circle class="pulse" cx="-44" cy="-18" r="4" fill="#fbbf24"/>
+              <text y="-4" fill="#e6eaf7" font-weight="600" font-size="13">Controller</text>
+              <text y="15" fill="#98a3c7">plans + verifies</text>
+            </g>
+            <g transform="translate(64 44)">
+              <rect x="-52" y="-26" width="104" height="52" rx="12" fill="#0f1528" stroke="#2a3558"/>
+              <text y="-3" fill="#e6eaf7" font-weight="600">Laptop A</text><text y="14" fill="#34d399">16 cores</text>
+            </g>
+            <g transform="translate(296 44)">
+              <rect x="-52" y="-26" width="104" height="52" rx="12" fill="#0f1528" stroke="#2a3558"/>
+              <text y="-3" fill="#e6eaf7" font-weight="600">Laptop B</text><text y="14" fill="#34d399">12 cores</text>
+            </g>
+            <g transform="translate(180 244)">
+              <rect x="-52" y="-26" width="104" height="52" rx="12" fill="#0f1528" stroke="#2a3558"/>
+              <text y="-3" fill="#e6eaf7" font-weight="600">Laptop C</text><text y="14" fill="#34d399">8 cores</text>
+            </g>
+          </g>
+          <g>
+            <rect x="122" y="84" width="10" height="10" rx="2" fill="#22d3ee"/>
+            <rect x="228" y="84" width="10" height="10" rx="2" fill="#fbbf24"/>
+            <rect x="175" y="196" width="10" height="10" rx="2" fill="#34d399"/>
+          </g>
+        </svg>
+        <p>Faster laptops get bigger pieces. Every result is checked by hash before it counts.</p>
+      </div>
+    </div>
+
+    <section id="how">
+      <div class="wrap">
+        <div class="eyebrow">How it works</div>
+        <h2>Three steps, no accounts, no cloud.</h2>
+        <p class="sub">Everything runs on your own network. The laptops talk only to each other, over encrypted connections.</p>
+        <div class="grid3">
+          <div class="card">
+            <div class="step">1</div>
+            <h3>Download and set up</h3>
+            <p>Unzip on every laptop and run <span class="file">Setup.cmd</span>. It installs Python for Daneion (internet needed once) and checks the laptop.</p>
+          </div>
+          <div class="card">
+            <div class="step">2</div>
+            <h3>Start one controller</h3>
+            <p>On one laptop run <span class="file">Start Controller.cmd</span>. The dashboard opens and shows a one-time pairing code.</p>
+          </div>
+          <div class="card">
+            <div class="step">3</div>
+            <h3>Join the others</h3>
+            <p>On the other laptops run <span class="file">Join Cluster.cmd</span> and paste the line from the dashboard. Then start a job.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="fitcheck">
+      <div class="wrap">
+        <div class="eyebrow">FitCheck</div>
+        <h2>It tells you when sharing is not worth it.</h2>
+        <p class="sub">Before every job, FitCheck predicts how long it takes on this laptop alone and across the cluster, counting startup, network transfer and merging. It only spreads the work when the gain is at least 15%.</p>
+        <div class="proof">
+          <div class="card">
+            <span class="tag tag-go">Distributed</span>
+            <h3>Fractal render · 160 tiles</h3>
+            <p>Heavy maths, tiny files: a good fit for sharing.</p>
+            <div class="bars">
+              <div class="bar"><span>One laptop</span><div class="track"><div class="fill" style="width:100%;background:var(--ink-400)"></div></div><span class="num">35.8 s</span></div>
+              <div class="bar"><span>Shared</span><div class="track"><div class="fill" style="width:74%;background:var(--brand)"></div></div><span class="num">26.5 s</span></div>
+              <div class="bar"><span>Predicted</span><div class="track"><div class="fill" style="width:74.3%;background:rgba(34,211,238,0.35)"></div></div><span class="num">26.6 s</span></div>
+            </div>
+            <p class="note">Same output, bit for bit, in all 6 runs.</p>
+          </div>
+          <div class="card">
+            <span class="tag tag-stay">Stays local</span>
+            <h3>Photo batch · resize and filter</h3>
+            <p>Light work, big files: sending them would cost more than it saves.</p>
+            <div class="bars">
+              <div class="bar"><span>Predicted</span><div class="track"><div class="fill" style="width:100%;background:rgba(251,191,36,0.4)"></div></div><span class="num">2.3 s</span></div>
+              <div class="bar"><span>Actual</span><div class="track"><div class="fill" style="width:96%;background:var(--amber)"></div></div><span class="num">2.2 s</span></div>
+            </div>
+            <p class="note">FitCheck kept it on one laptop and explained why.</p>
+          </div>
+        </div>
+        <p class="note">Measured on one 16-core laptop running the controller plus a second worker process (median of warm runs). Multi-laptop results will be published here after testing.</p>
+      </div>
+    </section>
+
+    <section id="scope">
+      <div class="wrap">
+        <div class="eyebrow">What it is</div>
+        <h2>Honest about what it does.</h2>
+        <p class="sub">Daneion speeds up jobs that split into independent pieces. It does not merge laptops into one big machine.</p>
+        <div class="grid2">
+          <div class="card">
+            <h3 style="margin-bottom:14px">Daneion is</h3>
+            <ul class="list yes">
+              <li>Built-in jobs that split into independent tasks</li>
+              <li>1 to 5 laptops that you own or trust, on one network</li>
+              <li>Results checked by SHA-256 before they count</li>
+              <li>Pairing with one-time codes over pinned, encrypted TLS</li>
+              <li>Owners can pause or remove their laptop at any time</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3 style="margin-bottom:14px">Daneion is not</h3>
+            <ul class="list no">
+              <li>A virtual GPU or pooled RAM / VRAM</li>
+              <li>A way to raise game frame rates</li>
+              <li>A runner for arbitrary code from other people</li>
+              <li>A cloud service: nothing leaves your network</li>
+              <li>Guaranteed faster: FitCheck says when it is not</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="help">
+      <div class="wrap">
+        <div class="eyebrow">Help</div>
+        <h2>Before you start</h2>
+        <p class="sub">Most problems come from the network, not from Daneion.</p>
+        <details open>
+          <summary>Which network should I use?</summary>
+          <p>A phone hotspot or your own router works best. Campus and guest Wi-Fi often block laptops from reaching each other.</p>
+        </details>
+        <details>
+          <summary>Other laptops can't connect to the controller</summary>
+          <p>Windows blocks incoming connections on networks marked <b>Public</b>. On the controller laptop either set the Wi-Fi network to <b>Private</b> in Settings, or open a terminal as administrator in the Daneion folder and run:</p>
+          <pre>uv run daneion firewall</pre>
+        </details>
+        <details>
+          <summary>Windows shows a security warning when I run the scripts</summary>
+          <p>The scripts are not code-signed yet, so Windows warns about files from the internet. Check the SHA-256 above first, then choose <b>Run</b> (or <b>More info → Run anyway</b>). To check the hash in PowerShell:</p>
+          <pre>Get-FileHash .\Daneion-0.1.0-windows.zip</pre>
+        </details>
+        <details>
+          <summary>Something else is wrong</summary>
+          <p>Run the built-in self-test in the Daneion folder. It checks Python, the network profile, ports, the firewall and the link to the controller:</p>
+          <pre>uv run daneion doctor</pre>
+        </details>
+        <details>
+          <summary>What about Linux and macOS?</summary>
+          <p>The code is written to be portable, but only Windows has been tested so far, so only a Windows download is offered.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="final">
+      <div class="wrap">
+        <h2>Got two laptops? Try it.</h2>
+        <p class="sub" style="margin:0 auto 28px">Free, open source, and runs entirely on your own network.</p>
+        <div class="cta">
+          <a class="btn btn-primary" href="https://github.com/arpitpandey0307/Daneion/releases/download/v0.1.0/Daneion-0.1.0-windows.zip">Download for Windows</a>
+          <a class="btn btn-ghost" href="https://github.com/arpitpandey0307/Daneion">View source</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>Daneion · built for InnoTech26</span>
+      <span><a href="https://github.com/arpitpandey0307/Daneion/releases">All releases</a> · <a href="https://github.com/arpitpandey0307/Daneion">GitHub</a></span>
+    </div>
+  </footer>
+
+  <script>
+    document.querySelectorAll("[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const text = document.getElementById(btn.dataset.copy).textContent.trim();
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.textContent = "Copied";
+        } catch {
+          btn.textContent = "Select it";
+        }
+        setTimeout(() => (btn.textContent = "Copy"), 1600);
+      });
+    });
+  </script>
+</body>
+</html>
