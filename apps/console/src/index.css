@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+/* Offline-friendly: system fonts only, no CDN. */
+@theme {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Inter",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", ui-monospace, "SF Mono", Consolas,
+    "Liberation Mono", monospace;
+
+  --color-ink-950: #070a12;
+  --color-ink-900: #0b1020;
+  --color-ink-850: #0f1528;
+  --color-ink-800: #141b31;
+  --color-ink-700: #1d2642;
+  --color-ink-600: #2a3558;
+  --color-ink-500: #45507a;
+  --color-ink-400: #6b77a3;
+  --color-ink-300: #98a3c7;
+  --color-ink-200: #c3cbe6;
+  --color-ink-100: #e6eaf7;
+
+  --color-brand: #22d3ee;
+  --color-brand-soft: #0e7490;
+  --color-amber: #fbbf24;
+  --color-good: #34d399;
+  --color-warn: #fbbf24;
+  --color-bad: #fb7185;
+
+  --animate-pulse-soft: pulse-soft 1.4s ease-in-out infinite;
+
+  @keyframes pulse-soft {
+    0%, 100% { opacity: 0.95; }
+    50% { opacity: 0.45; }
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(34, 211, 238, 0.07), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(251, 191, 36, 0.05), transparent 60%),
+    var(--color-ink-950);
+  color: var(--color-ink-100);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(34, 211, 238, 0.3);
+}
+
+/* Thin scrollbars that match the theme. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-600) transparent;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

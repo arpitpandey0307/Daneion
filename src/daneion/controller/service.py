@@ -46,6 +46,7 @@ CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 RETRYABLE = {"timeout", "killed", "worker_lost", "transfer", "resource", "lease_expired"}
 MODES = {"local", "distributed", "auto"}
+TILE_CHATTER = ("task.leased", "task.running", "task.succeeded")
 
 
 def hash_token(token: str) -> str:
@@ -108,6 +109,7 @@ class Controller:
         self._pair_failures: dict[str, list[float]] = {}
         self.inputs = InputStore(cfg.data_dir / "inputs")
         self._bench_cancel: dict[str, threading.Event] = {}
+        self._samples_busy = threading.Event()
 
     # ------------------------------------------------------------------ lifecycle
     def start_background(self) -> None:
@@ -890,6 +892,40 @@ class Controller:
                             .limit(limit)).all()
         return [self.get_benchmark(i) for i in ids]
 
+    # ------------------------------------------------------------------ sample data
+    @property
+    def samples_dir(self) -> Path:
+        return self.cfg.data_dir / "samples" / "photos"
+
+    def samples_status(self) -> dict[str, Any]:
+        d = self.samples_dir
+        count = len(list(d.glob("*.jpg"))) if d.exists() else 0
+        return {"path": str(d), "count": count, "generating": self._samples_busy.is_set()}
+
+    def make_sample_photos(self, count: int = 160) -> dict[str, Any]:
+        """Create demo photos in the background (about 0.2 s each)."""
+        from daneion.workloads.images import make_samples
+
+        if not 1 <= count <= 1000:
+            raise errors.InvalidRequest("count must be 1-1000")
+        if self._samples_busy.is_set():
+            return self.samples_status()
+        self._samples_busy.set()
+
+        def work() -> None:
+            try:
+                make_samples(self.samples_dir, count)
+            except Exception:
+                log.exception("sample photo generation failed")
+            finally:
+                self._samples_busy.clear()
+                with self.db.tx() as s:
+                    self._event(s, "samples.ready", f"{count} sample photos ready")
+                self._notify_events()
+
+        threading.Thread(target=work, name="samples", daemon=True).start()
+        return self.samples_status()
+
     # ------------------------------------------------------------------ queries
     def _job_dict(self, s: Session, job: Job) -> dict[str, Any]:
         counts = dict(s.execute(select(Task.state, func.count()).where(Task.job_id == job.id)
@@ -959,12 +995,20 @@ class Controller:
                      "last_seen_s": round(now - w.last_seen_at, 1)} for w in workers]
 
     def events_since(self, after_id: int = 0, job_id: str | None = None,
-                     limit: int = 500) -> list[dict[str, Any]]:
+                     limit: int = 500, *, tail: int | None = None,
+                     important: bool = False) -> list[dict[str, Any]]:
+        """Events after `after_id` (oldest first), or the newest `tail` events.
+        `important` drops per-tile chatter (leased/running/succeeded) for timelines."""
         with self.db.read() as s:
             q = select(EventRow).where(EventRow.id > after_id)
             if job_id:
                 q = q.where(EventRow.job_id == job_id)
-            rows = s.scalars(q.order_by(EventRow.id).limit(limit)).all()
+            if important:
+                q = q.where(EventRow.kind.not_in(TILE_CHATTER))
+            if tail:
+                rows = list(reversed(s.scalars(q.order_by(EventRow.id.desc()).limit(tail)).all()))
+            else:
+                rows = s.scalars(q.order_by(EventRow.id).limit(limit)).all()
             return [{"id": e.id, "ts": e.ts, "kind": e.kind, "job_id": e.job_id,
                      "task_id": e.task_id, "worker_id": e.worker_id, "message": e.message,
                      "data": e.data} for e in rows]

@@ -107,3 +107,10 @@ def test_revoke_by_name_through_console(ctl: Controller) -> None:
     assert http.post("/api/v1/workers/omen/revoke").status_code == 200
     assert [w["state"] for w in ctl.list_workers()] == ["REVOKED"]
     assert http.post("/api/v1/workers/omen/revoke").status_code == 404
+
+
+def test_workloads_endpoint_lists_every_workload(ctl: Controller) -> None:
+    http = TestClient(create_app(ctl), base_url="http://127.0.0.1:8750")
+    r = http.get("/api/v1/workloads")
+    assert r.status_code == 200
+    assert {w["name"] for w in r.json()} == {"fractal_tiles_v1", "image_batch_v1"}

@@ -158,8 +158,9 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
     def workloads() -> list[dict[str, Any]]:
         from daneion.workloads import REGISTRY
 
-        return [{"name": w.name, "title": w.title,
-                 "presets": {k: w.validate(v) for k, v in w.presets.items()}}
+        # Presets are partial parameter sets (photo presets need a folder); jobs are
+        # validated in full when submitted.
+        return [{"name": w.name, "title": w.title, "presets": w.presets}
                 for w in REGISTRY.values()]
 
     @api.get("/workers")
@@ -217,9 +218,23 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
         return ctl.cancel_benchmark(bench_id)
 
     @api.get("/events")
-    def events(after: int = 0, job_id: str | None = None,
-               limit: int = 500) -> list[dict[str, Any]]:
-        return ctl.events_since(after, job_id, min(max(limit, 1), 5000))
+    def events(after: int = 0, job_id: str | None = None, limit: int = 500,
+               tail: int | None = None, important: bool = False) -> list[dict[str, Any]]:
+        return ctl.events_since(after, job_id, min(max(limit, 1), 5000),
+                                tail=min(max(tail, 1), 1000) if tail else None,
+                                important=important)
+
+    @api.get("/system")
+    def system() -> dict[str, Any]:
+        import socket
+
+        return {"hostname": socket.gethostname(), "version": __version__,
+                "data_dir": str(ctl.cfg.data_dir), "lan": lan_info or None,
+                "max_nodes": ctl.cfg.max_nodes, "samples": ctl.samples_status()}
+
+    @api.post("/samples/photos")
+    def sample_photos(count: int = 160) -> dict[str, Any]:
+        return ctl.make_sample_photos(count)
 
     @api.get("/events/stream")
     async def event_stream(request: Request, after: int | None = None) -> StreamingResponse:
