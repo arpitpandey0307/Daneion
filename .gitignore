@@ -50,3 +50,6 @@ desktop.ini
 .vscode/
 .idea/
 .daneion*/
+
+# --- Claude Code local settings ---
+.claude/
