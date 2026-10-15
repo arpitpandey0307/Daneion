@@ -64,3 +64,17 @@ def test_palette_is_valid_rgb() -> None:
 
     pal = _palette()
     assert len(pal) == 256 and all(0 <= c <= 255 for rgb in pal for c in rgb)
+
+
+def test_reference_tile_is_reproduced_bit_for_bit() -> None:
+    from daneion.workloads.fractal import CALIBRATION, REFERENCE_TILE_SHA256
+
+    assert hashlib.sha256(wl.run(dict(CALIBRATION))).hexdigest() == REFERENCE_TILE_SHA256
+
+
+def test_quick_preset_result_matches_reference_image() -> None:
+    from daneion.workloads.fractal import REFERENCE_QUICK_PNG_SHA256
+
+    p = wl.validate(wl.presets["quick"])
+    png, _ = wl.merge(p, [wl.run(t) for t in wl.split(p)])
+    assert hashlib.sha256(png).hexdigest() == REFERENCE_QUICK_PNG_SHA256

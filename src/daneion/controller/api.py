@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from daneion import __version__
+from daneion.build import build_info
 from daneion.controller import errors
 from daneion.controller.db import Worker
 from daneion.controller.service import Controller
@@ -32,6 +33,7 @@ class HelloIn(BaseModel):
     os: str = Field(default="", max_length=64)
     slots: int = Field(default=1, ge=1, le=256)
     capabilities: dict[str, Any] = Field(default_factory=dict)
+    build: dict[str, str] = Field(default_factory=dict)
 
 
 class PollIn(BaseModel):
@@ -127,7 +129,7 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
 
     @app.get("/api/v1/health")
     def health() -> dict[str, Any]:
-        return {"ok": True, "version": __version__, "role": role}
+        return {"ok": True, "version": __version__, "role": role, "build": build_info()}
 
     # ---------------------------------------------------------------- console
     api = APIRouter(prefix="/api/v1")
@@ -229,6 +231,7 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
         import socket
 
         return {"hostname": socket.gethostname(), "version": __version__,
+                "build": build_info(),
                 "data_dir": str(ctl.cfg.data_dir), "lan": lan_info or None,
                 "max_nodes": ctl.cfg.max_nodes, "samples": ctl.samples_status()}
 
@@ -266,9 +269,10 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
 
     @wk.post("/hello")
     def hello(body: HelloIn, worker: WorkerDep) -> dict[str, Any]:
-        ctl.update_worker(worker.id, capabilities=body.capabilities, slots=body.slots,
-                          os_name=body.os)
-        return {"worker_id": worker.id, "name": worker.name,
+        ctl.check_build(worker, body.build)
+        ctl.update_worker(worker.id, capabilities={**body.capabilities, "build": body.build},
+                          slots=body.slots, os_name=body.os)
+        return {"worker_id": worker.id, "name": worker.name, "build": build_info(),
                 "heartbeat_interval_s": ctl.cfg.heartbeat_interval_s,
                 "lease_ttl_s": ctl.cfg.lease_ttl_s}
 

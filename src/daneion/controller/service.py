@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from daneion.build import build_info, workload_fingerprint
 from daneion.config import ControllerConfig
 from daneion.controller import errors, fitcheck
 from daneion.controller.db import Attempt, Benchmark, Database, EventRow, Job, Task, Worker
@@ -173,6 +174,11 @@ class Controller:
         """Create a worker identity and return (worker_id, bearer token). Token is stored hashed."""
         token = secrets.token_urlsafe(32)
         now = self.clock()
+        caps = dict(capabilities or {})
+        if capabilities is None:
+            # Created inside this process (the controller's own worker): same code by definition.
+            # Paired laptops pass their capabilities and must prove their build in hello.
+            caps["build"] = build_info()
         with self.db.tx() as s:
             active = s.scalar(select(func.count()).select_from(Worker)
                               .where(Worker.state != WorkerState.REVOKED)) or 0
@@ -181,7 +187,7 @@ class Controller:
                     f"cluster already has {active} of {self.cfg.max_nodes} laptops")
             worker = Worker(id=new_id("wrk"), name=name[:64], token_hash=hash_token(token),
                             is_local=is_local, state=WorkerState.ONLINE, os=os_name,
-                            capabilities=capabilities or {}, slots=max(1, slots),
+                            capabilities=caps, slots=max(1, slots),
                             paired_at=now, last_seen_at=now, version=1)
             s.add(worker)
             self._event(s, "worker.paired", f"{worker.name} joined", worker_id=worker.id,
@@ -261,6 +267,19 @@ class Controller:
                             worker_id=old.id)
         return self.register_worker(name, os_name=os_name, capabilities=capabilities,
                                     slots=slots)
+
+    def check_build(self, worker: Worker, build: dict[str, str] | None) -> None:
+        """Refuse a laptop whose workload code differs from the controller's."""
+        mine = workload_fingerprint()
+        theirs = (build or {}).get("workloads")
+        if theirs == mine:
+            return
+        msg = (f"{worker.name} runs different Daneion workload code ({theirs or 'unknown'}, "
+               f"controller has {mine}). On that laptop run: git pull, then uv sync.")
+        with self.db.tx() as s:
+            self._event(s, "worker.version_mismatch", msg, worker_id=worker.id)
+        self._notify_events()
+        raise errors.VersionMismatch(msg)
 
     def authenticate(self, token: str | None) -> Worker:
         if not token:
@@ -464,6 +483,9 @@ class Controller:
                 raise errors.Unauthorized("worker was revoked")  # ends a waiting long-poll
             if w.state != WorkerState.ONLINE:
                 return []
+            if (w.capabilities or {}).get("build", {}).get("workloads") != workload_fingerprint():
+                raise errors.VersionMismatch(
+                    f"{w.name} has not completed a version check (hello) with this controller")
             q = (select(Task, Job).join(Job, Job.id == Task.job_id)
                  .where(Task.state.in_([TaskState.QUEUED, TaskState.RETRY_WAIT]),
                         Task.eligible_at <= now,
@@ -1008,7 +1030,7 @@ class Controller:
             if tail:
                 rows = list(reversed(s.scalars(q.order_by(EventRow.id.desc()).limit(tail)).all()))
             else:
-                rows = s.scalars(q.order_by(EventRow.id).limit(limit)).all()
+                rows = list(s.scalars(q.order_by(EventRow.id).limit(limit)).all())
             return [{"id": e.id, "ts": e.ts, "kind": e.kind, "job_id": e.job_id,
                      "task_id": e.task_id, "worker_id": e.worker_id, "message": e.message,
                      "data": e.data} for e in rows]

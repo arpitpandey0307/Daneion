@@ -46,5 +46,11 @@ class PairingFailed(DaneionError):
     status, code = 401, "PAIRING_FAILED"
 
 
+class VersionMismatch(DaneionError):
+    """The laptop runs different workload code; its results could differ, so it may not work."""
+
+    status, code = 409, "VERSION_MISMATCH"
+
+
 class RateLimited(DaneionError):
     status, code = 429, "RATE_LIMITED"

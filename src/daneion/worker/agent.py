@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from daneion.build import build_info
 from daneion.worker.probe import default_slots, os_name, probe
 from daneion.worker.sandbox import EXIT_RESOURCE, TaskGuard, _kill_tree
 
@@ -45,6 +46,25 @@ class Running:
 
 class StaleLease(Exception):
     pass
+
+
+def _error_message(exc: Exception) -> str:
+    try:
+        return str(json.loads(str(exc))["error"]["message"])
+    except (ValueError, KeyError, TypeError):
+        return str(exc)
+
+
+def keep_awake(on: bool) -> None:
+    """While this laptop is in the cluster, Windows must not go to sleep mid-job (the screen
+    may still turn off). Released when the worker stops."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    es_continuous, es_system_required = 0x80000000, 0x00000001
+    flags = es_continuous | (es_system_required if on else 0)
+    ctypes.windll.kernel32.SetThreadExecutionState(flags)
 
 
 def calibrate_all() -> dict[str, float]:
@@ -143,10 +163,17 @@ class WorkerAgent:
             log.info("link to controller: %.0f ms, %.0f/%.0f Mbit/s down/up",
                      net["rtt_ms"], net["down_mbps"], net["up_mbps"])
         self.capabilities = caps
-        hello = self._with_retry(lambda: self._post("/api/v1/worker/hello", {
-            "name": self.name, "os": os_name(), "slots": self.slots, "capabilities": caps}))
+        try:
+            hello = self._with_retry(lambda: self._post("/api/v1/worker/hello", {
+                "name": self.name, "os": os_name(), "slots": self.slots, "capabilities": caps,
+                "build": build_info()}))
+        except StaleLease as exc:
+            log.error("controller refused this laptop: %s", _error_message(exc))
+            self.stop()
+            return
         if hello is None:
             return
+        keep_awake(True)
         self.heartbeat_interval_s = float(hello.get("heartbeat_interval_s", 3.0))
         log.info("connected as %s with %d slots", hello.get("name"), self.slots)
         hb = threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True)
@@ -169,6 +196,10 @@ class WorkerAgent:
                               "pair again with `daneion join`")
                     self.stop()
                     break
+                if "VERSION_MISMATCH" in str(exc):
+                    log.error("controller refused this laptop: %s", _error_message(exc))
+                    self.stop()
+                    break
                 log.warning("poll failed: %s; retrying in %.0fs", exc, backoff)
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, 15.0)
@@ -179,6 +210,7 @@ class WorkerAgent:
                 threading.Thread(target=self._execute, args=(lease,), daemon=True,
                                  name=f"task-{lease['attempt_id']}").start()
         self._kill_all()
+        keep_awake(False)
 
     def stop(self) -> None:
         self._stop.set()

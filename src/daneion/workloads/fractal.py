@@ -45,6 +45,11 @@ LIMITS = {
     "max_iter": (16, 65535),
 }
 
+# Known-good results. Every laptop must reproduce them bit for bit (daneion doctor checks);
+# a mismatch means that machine computes different floating-point results and must not join.
+REFERENCE_TILE_SHA256 = "740fbdbcc9292df9f2a739155e40d139d284fae6d6414df1c3077d4670cf93d3"
+REFERENCE_QUICK_PNG_SHA256 = "709e1382ac3606e0b1afa2efeb19650d76380c7f0072f5fd117218dabce448fc"
+
 PIXEL_COST = 12  # per-pixel loop overhead, expressed in equivalent iterations
 SAMPLE_STEP = 24  # estimate() renders every 24th pixel in each direction (~1/576 of the work)
 CALIBRATION = {"width": 640, "height": 400, "x0": 300, "y0": 180, "tw": 40, "th": 40,

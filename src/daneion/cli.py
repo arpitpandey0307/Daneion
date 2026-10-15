@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import socket
 import sys
 import threading
@@ -446,14 +445,25 @@ def main(argv: list[str] | None = None) -> int:
     ws.add_argument("--resume", metavar="NAME_OR_ID")
     ws.set_defaults(fn=cmd_workers)
 
+    dr = sub.add_parser("doctor", help="pre-demo checklist for this laptop and the cluster")
+    dr.add_argument("--role", choices=["auto", "controller", "worker"], default="auto")
+    dr.add_argument("--controller", default=CONSOLE_URL)
+    dr.add_argument("--data-dir", default=str(default_data_dir()))
+    dr.add_argument("--run-job", action="store_true",
+                    help="also run a quick distributed job and check its result")
+    dr.set_defaults(fn=lambda a: __import__("daneion.doctor", fromlist=["doctor"]).doctor(a))
+
     fw = sub.add_parser("firewall", help="show how to let other laptops reach this controller")
     fw.add_argument("--lan-port", type=int, default=8751)
     fw.set_defaults(fn=cmd_firewall)
 
     args = p.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    from daneion.logs import setup_logging
+
+    role = args.cmd if args.cmd in ("controller", "worker", "join") else None
+    data_dir = getattr(args, "data_dir", None)
+    setup_logging(args.verbose, Path(data_dir) / "logs" if role and data_dir else None,
+                  role or "daneion")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     return int(args.fn(args))
