@@ -127,6 +127,20 @@ def test_finished_job_teaches_fitcheck_the_real_speed(tmp_path: Path) -> None:
         assert nxt["fitcheck"]["nodes"][0]["source"] == "observed"
 
 
+def test_one_slow_job_cannot_wreck_the_learned_speed(tmp_path: Path) -> None:
+    from daneion.controller.db import Worker
+
+    with live_cluster(tmp_path / "c", slots=2) as (ctl, _):
+        [w] = ctl.list_workers()
+        inflated = 1e6  # far faster than reality, so the next job looks "slow" by ~1000x
+        with ctl.db.tx() as s:
+            s.get(Worker, w["id"]).perf = {"fractal_tiles_v1": inflated}
+        job = wait_job(ctl, ctl.submit_job("fractal_tiles_v1", SMALL, "local")["id"])
+        assert job["state"] == "SUCCEEDED"
+        [w] = ctl.list_workers()
+        assert w["perf"]["fractal_tiles_v1"] == pytest.approx(0.75 * inflated)
+
+
 def test_biggest_tiles_are_leased_first(tmp_path: Path) -> None:
     ctl = Controller(ControllerConfig(data_dir=tmp_path))
     _, token = ctl.register_worker("w", is_local=True, slots=1)

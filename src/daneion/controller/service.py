@@ -783,6 +783,10 @@ class Controller:
             rate = units / busy
             perf = dict(w.perf or {})
             old = perf.get(job.handler)
+            if old:
+                # One job slowed by something else on the laptop (antivirus scan, updates)
+                # must not wreck the history: move at most 2x either way per job.
+                rate = min(max(rate, old / 2), old * 2)
             perf[job.handler] = rate if not old else 0.5 * old + 0.5 * rate
             w.perf = perf
 

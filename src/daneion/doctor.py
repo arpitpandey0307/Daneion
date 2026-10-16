@@ -70,6 +70,15 @@ class Doctor:
             self.add(FAIL, "This laptop computes a DIFFERENT reference tile",
                      "Its results would not match the others. Do not use it as a worker.")
 
+        launch = _task_launch_time()
+        if launch < 2.0:
+            self.add(OK, f"Tasks start quickly ({launch:.1f}s for 8 at once)")
+        else:
+            self.add(WARN, f"Tasks start slowly right now ({launch:.1f}s for 8 at once, "
+                     "normally under 1s)",
+                     "Something else is busy (antivirus scan, Windows Update). Jobs will be "
+                     "slow; wait a few minutes and run doctor again before benchmarking.")
+
         battery = psutil.sensors_battery() if hasattr(psutil, "sensors_battery") else None
         if battery is None:
             self.add(INFO, "No battery information")
@@ -240,6 +249,20 @@ class Doctor:
         print(f"\n{fails} problem(s), {warns} warning(s)."
               + (" Ready for the demo." if not fails and not warns else ""))
         return 1 if fails else 0
+
+
+def _task_launch_time(n: int = 8) -> float:
+    """Wall time to start n task-like Python processes in parallel, the way the worker does."""
+    from daneion.worker.sandbox import TaskGuard
+
+    t0 = time.perf_counter()
+    procs = [subprocess.Popen([sys.executable, "-c", "import daneion.workloads"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, **TaskGuard(memory_mb=512).popen_kwargs())
+             for _ in range(n)]
+    for p in procs:
+        p.wait()
+    return time.perf_counter() - t0
 
 
 def _port_in_use(port: int) -> bool:
