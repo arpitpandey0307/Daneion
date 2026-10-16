@@ -1,6 +1,6 @@
 [project]
 name = "daneion"
-version = "0.1.0"
+version = "0.1.1"
 description = "LAN compute sharing for trusted laptops: controller, worker and built-in workloads"
 requires-python = ">=3.12,<3.14"
 dependencies = [
