@@ -487,6 +487,9 @@ def main(argv: list[str] | None = None) -> int:
 
     role = args.cmd if args.cmd in ("controller", "worker", "join") else None
     data_dir = getattr(args, "data_dir", None)
+    if data_dir:
+        # Task subprocesses run inside their own task dir, so a relative path would break them.
+        args.data_dir = data_dir = str(Path(data_dir).resolve())
     setup_logging(args.verbose, Path(data_dir) / "logs" if role and data_dir else None,
                   role or "daneion")
     if hasattr(sys.stdout, "reconfigure"):
