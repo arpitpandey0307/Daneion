@@ -102,7 +102,8 @@ class Doctor:
         profile = _network_profile()
         if profile and "Public" in profile:
             self.add(WARN, f"Network profile: {profile}",
-                     "On the controller laptop this blocks workers. Fix: daneion firewall")
+                     "On the controller laptop this blocks workers. Fix: run "
+                     "'Allow Workers (firewall).cmd' (or: daneion firewall)")
         elif profile:
             self.add(OK, f"Network profile: {profile}")
 
@@ -141,7 +142,8 @@ class Doctor:
                 self.add(OK, "Firewall rule for workers present")
             else:
                 self.add(WARN, "No Daneion firewall rule",
-                         "Other laptops may be blocked. Run `daneion firewall` for the fix.")
+                         "Other laptops may be blocked. Run 'Allow Workers (firewall).cmd' "
+                         "(or: daneion firewall).")
 
         with httpx.Client(base_url=self.console_url, timeout=10) as http:
             workers = [w for w in http.get("/api/v1/workers").json() if w["state"] != "REVOKED"]
