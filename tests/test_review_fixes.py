@@ -120,3 +120,27 @@ def test_revoked_worker_agent_stops_promptly(tmp_path: Path) -> None:
         agent.stop()
         server.should_exit = True
         ctl.stop_background()
+
+
+def test_cli_explains_when_the_controller_is_not_running(capsys) -> None:  # type: ignore[no-untyped-def]
+    url = f"http://127.0.0.1:{free_port()}"
+    assert cli.main(["workers", "--controller", url]) == 2
+    assert "Cannot reach the Daneion controller" in capsys.readouterr().err
+
+
+def test_chunked_result_upload_is_capped(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    ctl = Controller(ControllerConfig(data_dir=tmp_path, max_result_bytes=1000))
+    _, token = ctl.register_worker("w", slots=1)
+    client = TestClient(create_app(ctl, role="lan"))
+
+    def body():  # type: ignore[no-untyped-def]  # a generator body is sent without content-length
+        for _ in range(5):
+            yield b"x" * 500
+
+    r = client.put("/api/v1/worker/attempts/att_x/result", content=body(),
+                   headers={"Authorization": f"Bearer {token}", "X-Daneion-Fence": "1",
+                            "X-Daneion-Sha256": "0" * 64})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "RESULT_TOO_LARGE"

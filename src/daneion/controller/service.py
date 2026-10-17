@@ -275,7 +275,8 @@ class Controller:
         if theirs == mine:
             return
         msg = (f"{worker.name} runs different Daneion workload code ({theirs or 'unknown'}, "
-               f"controller has {mine}). On that laptop run: git pull, then uv sync.")
+               f"controller has {mine}). Install the same Daneion version on both laptops "
+               f"(same release zip, or git pull + uv sync).")
         with self.db.tx() as s:
             self._event(s, "worker.version_mismatch", msg, worker_id=worker.id)
         self._notify_events()

@@ -32,6 +32,7 @@ LAUNCHERS = {
     "Start Controller.cmd": "start-controller.ps1",
     "Join Cluster.cmd": "join.ps1",
     "Start Worker.cmd": "start-worker.ps1",
+    "Allow Workers (firewall).cmd": "firewall.ps1",
 }
 
 README = """\
@@ -49,8 +50,8 @@ Share compute between trusted laptops on the same Wi-Fi or hotspot.
 
 Network tips
 - Use a phone hotspot or your own router; campus Wi-Fi often blocks laptop-to-laptop traffic.
-- Set the Wi-Fi network to Private on the controller, or run as admin:
-      uv run daneion firewall
+- Other laptops can't connect? On the controller run "Allow Workers (firewall).cmd"
+  once: it opens port 8751 and offers to mark the Wi-Fi as Private.
 - Something wrong? Run:  uv run daneion doctor
 
 Verify the download: compare the SHA-256 of the zip with the one on the download page.

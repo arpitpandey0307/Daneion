@@ -319,7 +319,13 @@ def create_app(ctl: Controller, console_dir: Path | None = None, *, role: str = 
         declared = int(request.headers.get("content-length") or 0)
         if declared > ctl.cfg.max_result_bytes:
             raise errors.InvalidRequest("result too large", code="RESULT_TOO_LARGE")
-        data = await request.body()
+        chunks, size = [], 0
+        async for chunk in request.stream():  # chunked uploads carry no content-length
+            size += len(chunk)
+            if size > ctl.cfg.max_result_bytes:
+                raise errors.InvalidRequest("result too large", code="RESULT_TOO_LARGE")
+            chunks.append(chunk)
+        data = b"".join(chunks)
         return await run_in_threadpool(ctl.complete, worker, attempt_id, x_daneion_fence, data,
                                        x_daneion_sha256, x_daneion_duration)
 

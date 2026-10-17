@@ -40,6 +40,13 @@ def _local_worker_token(ctl: object, cfg: ControllerConfig, slots: int) -> str:
     return token
 
 
+def _error_text(r: httpx.Response) -> str:
+    try:
+        return str(r.json()["error"]["message"])
+    except (ValueError, KeyError, TypeError):
+        return r.text or f"HTTP {r.status_code}"
+
+
 def _serve_in_thread(server: Any, name: str) -> threading.Thread:
     def run() -> None:
         try:
@@ -110,7 +117,8 @@ def cmd_controller(args: argparse.Namespace) -> int:
         print(f"  Workers join over TLS on:   {ips} port {cfg.lan_port}")
         print(f"  Certificate fingerprint:    {lan_info['fingerprint']}")
         print("  To add a laptop:            daneion pair")
-        print("  Other laptops can't connect? daneion firewall")
+        print("  Other laptops can't connect? run 'Allow Workers (firewall).cmd' or "
+              "daneion firewall")
     try:
         server.run()
     finally:
@@ -135,7 +143,7 @@ def cmd_pair(args: argparse.Namespace) -> int:
     with httpx.Client(base_url=args.controller, timeout=10) as http:
         r = http.post("/api/v1/pairing")
     if r.status_code >= 400:
-        print(r.text, file=sys.stderr)
+        print(_error_text(r), file=sys.stderr)
         return 1
     info = r.json()
     print(f"Pairing code {info['code']}  (valid {info['ttl_s']:.0f}s, single use)")
@@ -175,13 +183,17 @@ def cmd_join(args: argparse.Namespace) -> int:
     url = f"https://{args.host}:{args.port}"
     slots = args.slots or default_slots()
     name = args.name or socket.gethostname()
-    with httpx.Client(base_url=url, verify=pinned_context(cert_path), timeout=15) as http:
-        r = http.post("/api/v1/worker/pair", json={
-            "code": args.code, "name": name, "os": os_name(), "slots": slots,
-            "capabilities": probe()})
-    if r.status_code >= 400:
-        print(f"Pairing refused: {r.json().get('error', {}).get('message', r.text)}",
+    try:
+        with httpx.Client(base_url=url, verify=pinned_context(cert_path), timeout=15) as http:
+            r = http.post("/api/v1/worker/pair", json={
+                "code": args.code, "name": name, "os": os_name(), "slots": slots,
+                "capabilities": probe()})
+    except httpx.HTTPError as exc:
+        print(f"Pairing failed, lost the connection to {args.host}:{args.port}: {exc}",
               file=sys.stderr)
+        return 2
+    if r.status_code >= 400:
+        print(f"Pairing refused: {_error_text(r)}", file=sys.stderr)
         return 4
     body = r.json()
     (d / "credentials.json").write_text(json.dumps({
@@ -242,7 +254,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
         r = http.post("/api/v1/jobs", json={"handler": args.handler, "params": params,
                                             "mode": args.mode})
         if r.status_code >= 400:
-            print(r.text, file=sys.stderr)
+            print(_error_text(r), file=sys.stderr)
             return 1
         job = r.json()
         print(f"{job['id']}  {job['state']}  placement={job['placement']}  "
@@ -274,7 +286,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     with httpx.Client(base_url=args.controller, timeout=30) as http:
         r = http.post("/api/v1/benchmarks", json=body)
         if r.status_code >= 400:
-            print(r.json()["error"]["message"], file=sys.stderr)
+            print(_error_text(r), file=sys.stderr)
             return 1
         b = r.json()
         print(f"Benchmark {b['id']}: {b['warmup']} warm-up + {b['runs']} measured runs per mode")
@@ -323,7 +335,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             bench_id = done[0]["id"]
         r = http.get(f"/api/v1/benchmarks/{bench_id}/report.html")
         if r.status_code >= 400:
-            print(r.text, file=sys.stderr)
+            print(_error_text(r), file=sys.stderr)
             return 1
     out = Path(args.out or f"daneion-proof-of-speed-{bench_id[6:]}.html")
     out.write_text(r.text, encoding="utf-8")
@@ -350,7 +362,7 @@ def cmd_workers(args: argparse.Namespace) -> int:
             if target:
                 r = http.post(f"/api/v1/workers/{target}/{action}")
                 if r.status_code >= 400:
-                    print(r.json()["error"]["message"], file=sys.stderr)
+                    print(_error_text(r), file=sys.stderr)
                     return 1
                 print(f"{action}d {target}")
         workers = http.get("/api/v1/workers").json()
@@ -494,7 +506,14 @@ def main(argv: list[str] | None = None) -> int:
                   role or "daneion")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
-    return int(args.fn(args))
+    try:
+        return int(args.fn(args))
+    except httpx.ConnectError:
+        url = getattr(args, "controller", None) or CONSOLE_URL
+        print(f"Cannot reach the Daneion controller at {url}. Is it running on this laptop? "
+              "Start it with Start Controller.cmd or `uv run daneion controller`.",
+              file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

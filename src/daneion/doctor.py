@@ -162,7 +162,8 @@ class Doctor:
                     self.add(WARN, line, "Not online: check its Wi-Fi and that `daneion worker` "
                                          "is running there.")
                 elif build and build != mine:
-                    self.add(FAIL, line, "Different workload code: git pull and uv sync there.")
+                    self.add(FAIL, line,
+                             "Different workload code: install the same Daneion version there.")
                 elif net and (net["down_mbps"] < 20 or net["rtt_ms"] > 40):
                     self.add(WARN, line, "Slow link: move closer to the hotspot or use a router.")
                 else:
@@ -231,7 +232,8 @@ class Doctor:
             self.add(OK, f"Worker identity valid ({creds['name']})")
         if health.get("build", {}).get("workloads") != build_info()["workloads"]:
             self.add(FAIL, "Controller runs different workload code",
-                     "Update both laptops to the same commit: git pull, then uv sync.")
+                     "Install the same Daneion version on both laptops "
+                     "(same zip, or git pull + uv sync).")
         else:
             self.add(OK, "Same workload code as the controller")
 

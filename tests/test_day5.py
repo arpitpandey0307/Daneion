@@ -31,7 +31,7 @@ def test_laptop_with_different_workload_code_is_refused(ctl: Controller) -> None
     assert http.post("/api/v1/worker/poll", json={"free_slots": 2, "wait_s": 0}).status_code == 409
     bad = http.post("/api/v1/worker/hello", json={"build": {"workloads": "0000"}})
     assert bad.status_code == 409 and bad.json()["error"]["code"] == "VERSION_MISMATCH"
-    assert "git pull" in bad.json()["error"]["message"]
+    assert "same Daneion version" in bad.json()["error"]["message"]
     assert http.post("/api/v1/worker/poll", json={"free_slots": 2, "wait_s": 0}).status_code == 409
     ok = http.post("/api/v1/worker/hello", json={"build": build_info()})
     assert ok.status_code == 200 and ok.json()["build"] == build_info()
